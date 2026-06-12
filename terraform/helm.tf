@@ -121,7 +121,12 @@ resource "helm_release" "socket_firewall" {
   repository = "https://socketdev-demo.github.io/socket-firewall-helm"
   chart      = "socket-firewall"
   version    = var.helm_chart_version
-  wait       = true
+  # TEMPORARY: wait disabled to break the taint->replace loop during the
+  # LoadBalancer->ClusterIP migration. A failed `wait` was tainting the release,
+  # causing every apply to uninstall (thrashing the old external LB) and
+  # reinstall. With wait=false the install returns immediately so the workload
+  # can settle and be observed. Revert to wait=true once the rollout is healthy.
+  wait       = false
   timeout    = 600
 
   values = [yamlencode(local.helm_values)]

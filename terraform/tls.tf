@@ -91,9 +91,11 @@ resource "kubectl_manifest" "socket_firewall_gateway" {
               from = "Same"
             }
           }
-          tls = {
-            mode = "Terminate"
-          }
+          # No tls block: TLS is configured entirely by the
+          # networking.gke.io/certmap annotation above. Per GKE docs, including a
+          # tls section alongside the certmap annotation is rejected — either by
+          # the Gateway API CEL rule (certificateRefs/options required for
+          # Terminate) or by GKE (certificateRefs conflicts with the certmap).
         },
       ]
     }
