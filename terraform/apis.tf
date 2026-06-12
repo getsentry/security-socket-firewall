@@ -17,6 +17,8 @@ locals {
     "secretmanager.googleapis.com",        # Socket API token secret
     "certificatemanager.googleapis.com",   # GCP-managed TLS certificates
     "servicenetworking.googleapis.com",    # private GKE control plane VPC peering
+    "cloudkms.googleapis.com",             # CMEK keys for GKE, node disks, secret
+    "binaryauthorization.googleapis.com",  # image admission policy enforcement
   ])
 }
 

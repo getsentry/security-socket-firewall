@@ -49,7 +49,9 @@ resource "google_compute_firewall" "deny_egress_all" {
   }
 }
 
-# Allow only TCP 80/443 egress to reach upstream registries and Socket.dev API
+# Allow only TCP 443 egress to reach upstream registries and the Socket.dev API.
+# Port 80 removed — all configured upstreams (npm/PyPI/Maven) and the
+# Socket API are HTTPS, and GCP-managed TLS uses DNS-01 (no HTTP-01 challenge).
 resource "google_compute_firewall" "allow_egress" {
   name      = "${var.cluster_name}-allow-egress"
   network   = google_compute_network.main.id
@@ -58,7 +60,7 @@ resource "google_compute_firewall" "allow_egress" {
 
   allow {
     protocol = "tcp"
-    ports    = ["443", "80"]
+    ports    = ["443"]
   }
 
   destination_ranges = ["0.0.0.0/0"]

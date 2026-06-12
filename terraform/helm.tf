@@ -27,14 +27,14 @@ locals {
       routes  = []
     }
 
-    service = local.use_gcp_managed_tls ? {
-      type            = "ClusterIP"
-      httpsTargetPort = "http"
-      } : merge(
+    service = merge(
       {
-        type = "LoadBalancer"
+        type = local.use_gcp_managed_tls ? "ClusterIP" : "LoadBalancer"
       },
-      var.internal_load_balancer ? {
+      local.use_gcp_managed_tls ? {
+        httpsTargetPort = "http"
+      } : {},
+      (!local.use_gcp_managed_tls && var.internal_load_balancer) ? {
         annotations = {
           "networking.gke.io/load-balancer-type" = "Internal"
         }
@@ -63,6 +63,26 @@ locals {
       limits = {
         cpu    = "1"
         memory = "768Mi"
+      }
+    }
+
+    # Spread replicas across nodes so a single node loss doesn't take down
+    # the firewall. Soft (preferred) so scheduling still succeeds on one node.
+    affinity = {
+      podAntiAffinity = {
+        preferredDuringSchedulingIgnoredDuringExecution = [
+          {
+            weight = 100
+            podAffinityTerm = {
+              topologyKey = "kubernetes.io/hostname"
+              labelSelector = {
+                matchLabels = {
+                  "app.kubernetes.io/instance" = "socket-firewall"
+                }
+              }
+            }
+          },
+        ]
       }
     }
   }
@@ -113,6 +133,26 @@ data "kubernetes_service" "socket_firewall" {
   metadata {
     name      = helm_release.socket_firewall.name
     namespace = kubernetes_namespace.socket_firewall.metadata[0].name
+  }
+
+  depends_on = [helm_release.socket_firewall]
+}
+
+# Keep at least one firewall replica available during voluntary
+# disruptions (node drains, upgrades).
+resource "kubernetes_pod_disruption_budget_v1" "socket_firewall" {
+  metadata {
+    name      = "socket-firewall-tf"
+    namespace = kubernetes_namespace.socket_firewall.metadata[0].name
+  }
+
+  spec {
+    min_available = 1
+    selector {
+      match_labels = {
+        "app.kubernetes.io/instance" = helm_release.socket_firewall.name
+      }
+    }
   }
 
   depends_on = [helm_release.socket_firewall]

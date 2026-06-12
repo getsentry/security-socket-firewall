@@ -34,7 +34,7 @@ output "firewall_load_balancer_ip" {
   description = "Internal or external IP for HTTPS traffic (GKE Gateway when GCP-managed TLS is enabled, otherwise the socket-firewall LoadBalancer service)"
   value = local.use_gcp_managed_tls ? try(
     [
-      for addr in try(kubernetes_manifest.socket_firewall_gateway[0].object.status.addresses, []) :
+      for addr in try(data.kubernetes_resource.firewall_gateway[0].object.status.addresses, []) :
       addr.value if try(addr.type, "") == "IPAddress"
     ][0],
     null,

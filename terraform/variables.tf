@@ -70,13 +70,13 @@ variable "node_machine_type" {
 variable "node_count" {
   description = "Number of nodes per zone"
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "node_min_count" {
   description = "Minimum number of nodes (autoscaling)"
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "node_max_count" {
@@ -97,11 +97,6 @@ variable "socket_api_token_secret_id" {
   description = "Secret Manager secret ID for the Socket.dev API token (e.g. socket-firewall-api-token)"
   type        = string
   default     = "socket-firewall-api-token"
-}
-
-variable "secret_next_rotation_time" {
-  description = "RFC3339 timestamp for the first rotation notification (e.g. 2025-09-01T00:00:00Z). Must be within 90 days of apply."
-  type        = string
 }
 
 variable "firewall_namespace" {
@@ -132,6 +127,12 @@ variable "enable_autoscaling" {
   description = "Enable HPA for the firewall deployment"
   type        = bool
   default     = false
+}
+
+variable "enable_network_policies" {
+  description = "Apply default-deny-ingress NetworkPolicies in the firewall namespace (requires Calico enforcement on the cluster)"
+  type        = bool
+  default     = true
 }
 
 variable "path_routing_routes" {

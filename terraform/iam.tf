@@ -49,6 +49,10 @@ resource "google_project_iam_member" "gke_node_stackdriver_writer" {
 # this stack. They must be applied by a project owner/admin during bootstrap
 # (before the SA can run `terraform apply` itself).
 #
+# NOTE: the custom roles below require the bootstrap identity to hold
+# roles/iam.roleAdmin (iam.roles.create) so the roles can be created and
+# bound on the first apply.
+#
 # Bootstrap command:
 #   gcloud projects add-iam-policy-binding <PROJECT_ID> \
 #     --member="serviceAccount:socket-firewall-tf-apply@sac-prod-sa.iam.gserviceaccount.com" \
@@ -73,10 +77,64 @@ resource "google_project_iam_member" "tf_sa_network_admin" {
   member  = local.tf_sa_member
 }
 
-# Allow TF SA to create the GKE node service account
+# Least-privilege replacement for roles/iam.serviceAccountAdmin.
+# Limited to the verbs needed to manage the GKE node service account. (Service
+# account *creation* and setIamPolicy are inherently project-scoped in GCP, so
+# this cannot be narrowed to a single resource — but it drops every unused
+# permission the predefined role would otherwise grant.)
+resource "google_project_iam_custom_role" "tf_sa_manager" {
+  role_id     = "socketFirewallTfServiceAccountManager"
+  title       = "Socket Firewall TF Service Account Manager"
+  description = "Minimal permissions for the socket-firewall Terraform SA to manage the GKE node service account."
+  project     = var.project_id
+  permissions = [
+    "iam.serviceAccounts.create",
+    "iam.serviceAccounts.get",
+    "iam.serviceAccounts.list",
+    "iam.serviceAccounts.update",
+    "iam.serviceAccounts.delete",
+    "iam.serviceAccounts.getIamPolicy",
+    "iam.serviceAccounts.setIamPolicy",
+  ]
+}
+
 resource "google_project_iam_member" "tf_sa_sa_admin" {
   project = var.project_id
-  role    = "roles/iam.serviceAccountAdmin"
+  role    = google_project_iam_custom_role.tf_sa_manager.id
+  member  = local.tf_sa_member
+}
+
+# Least-privilege replacement for roles/secretmanager.secretAdmin.
+# Crucially this OMITS secretmanager.versions.access, so the deploy SA can no
+# longer read the payload of every secret in the project. Reading this stack's
+# own secret is granted resource-scoped via tf_sa_secret_accessor below.
+resource "google_project_iam_custom_role" "tf_secret_manager" {
+  role_id     = "socketFirewallTfSecretManager"
+  title       = "Socket Firewall TF Secret Manager"
+  description = "Minimal Secret Manager permissions for the socket-firewall Terraform SA (no project-wide payload access)."
+  project     = var.project_id
+  permissions = [
+    "secretmanager.secrets.create",
+    "secretmanager.secrets.get",
+    "secretmanager.secrets.list",
+    "secretmanager.secrets.update",
+    "secretmanager.secrets.delete",
+    "secretmanager.secrets.getIamPolicy",
+    "secretmanager.secrets.setIamPolicy",
+    "secretmanager.versions.add",
+    "secretmanager.versions.get",
+    "secretmanager.versions.list",
+    "secretmanager.versions.enable",
+    "secretmanager.versions.disable",
+    "secretmanager.versions.destroy",
+  ]
+}
+
+# KMS: allow the deploy SA to manage the CMEK key ring, keys, and their
+# IAM bindings.
+resource "google_project_iam_member" "tf_sa_kms_admin" {
+  project = var.project_id
+  role    = "roles/cloudkms.admin"
   member  = local.tf_sa_member
 }
 
@@ -93,7 +151,7 @@ resource "google_secret_manager_secret_iam_member" "tf_sa_secret_accessor" {
 # that is covered by the resource-scoped secretAccessor binding above)
 resource "google_project_iam_member" "tf_sa_secret_admin" {
   project = var.project_id
-  role    = "roles/secretmanager.secretAdmin"
+  role    = google_project_iam_custom_role.tf_secret_manager.id
   member  = local.tf_sa_member
 }
 

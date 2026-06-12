@@ -65,10 +65,10 @@ resource "google_certificate_manager_certificate_map_entry" "firewall" {
   project      = var.project_id
 }
 
-resource "kubernetes_manifest" "socket_firewall_gateway" {
+resource "kubectl_manifest" "socket_firewall_gateway" {
   count = local.use_gcp_managed_tls ? 1 : 0
 
-  manifest = {
+  yaml_body = yamlencode({
     apiVersion = "gateway.networking.k8s.io/v1"
     kind       = "Gateway"
     metadata = {
@@ -97,7 +97,7 @@ resource "kubernetes_manifest" "socket_firewall_gateway" {
         },
       ]
     }
-  }
+  })
 
   depends_on = [
     google_container_node_pool.main,
@@ -106,10 +106,84 @@ resource "kubernetes_manifest" "socket_firewall_gateway" {
   ]
 }
 
-resource "kubernetes_manifest" "socket_firewall_http_route" {
+# kubectl_manifest does not expose the live object status, so read the gateway's
+# assigned address back via the kubernetes provider for the output below.
+data "kubernetes_resource" "firewall_gateway" {
   count = local.use_gcp_managed_tls ? 1 : 0
 
-  manifest = {
+  api_version = "gateway.networking.k8s.io/v1"
+  kind        = "Gateway"
+
+  metadata {
+    name      = "${var.cluster_name}-gateway"
+    namespace = var.firewall_namespace
+  }
+
+  depends_on = [kubectl_manifest.socket_firewall_gateway]
+}
+
+# ---------------------------------------------------------------------------
+# Enforce a minimum TLS version (1.2) on the Gateway via an SSL policy.
+# Regional cluster gateways (gke-l7-rilb) need a regional SSL policy; global
+# external gateways need a global one.
+# ---------------------------------------------------------------------------
+
+resource "google_compute_region_ssl_policy" "firewall" {
+  count = local.use_gcp_managed_tls && var.internal_load_balancer ? 1 : 0
+
+  name            = "${var.cluster_name}-ssl-policy"
+  region          = var.region
+  project         = var.project_id
+  profile         = "MODERN"
+  min_tls_version = "TLS_1_2"
+}
+
+resource "google_compute_ssl_policy" "firewall" {
+  count = local.use_gcp_managed_tls && !var.internal_load_balancer ? 1 : 0
+
+  name            = "${var.cluster_name}-ssl-policy"
+  project         = var.project_id
+  profile         = "MODERN"
+  min_tls_version = "TLS_1_2"
+}
+
+locals {
+  ssl_policy_name = local.use_gcp_managed_tls ? (
+    var.internal_load_balancer
+    ? google_compute_region_ssl_policy.firewall[0].name
+    : google_compute_ssl_policy.firewall[0].name
+  ) : ""
+}
+
+resource "kubectl_manifest" "socket_firewall_gateway_policy" {
+  count = local.use_gcp_managed_tls ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "networking.gke.io/v1"
+    kind       = "GCPGatewayPolicy"
+    metadata = {
+      name      = "${var.cluster_name}-gateway-policy"
+      namespace = var.firewall_namespace
+    }
+    spec = {
+      default = {
+        sslPolicy = local.ssl_policy_name
+      }
+      targetRef = {
+        group = "gateway.networking.k8s.io"
+        kind  = "Gateway"
+        name  = "${var.cluster_name}-gateway"
+      }
+    }
+  })
+
+  depends_on = [kubectl_manifest.socket_firewall_gateway]
+}
+
+resource "kubectl_manifest" "socket_firewall_http_route" {
+  count = local.use_gcp_managed_tls ? 1 : 0
+
+  yaml_body = yamlencode({
     apiVersion = "gateway.networking.k8s.io/v1"
     kind       = "HTTPRoute"
     metadata = {
@@ -142,7 +216,7 @@ resource "kubernetes_manifest" "socket_firewall_http_route" {
         },
       ]
     }
-  }
+  })
 
-  depends_on = [kubernetes_manifest.socket_firewall_gateway]
+  depends_on = [kubectl_manifest.socket_firewall_gateway]
 }

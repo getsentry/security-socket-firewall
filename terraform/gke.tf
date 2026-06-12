@@ -1,6 +1,6 @@
 resource "google_container_cluster" "main" {
-  name               = var.cluster_name
-  location           = var.zone
+  name                = var.cluster_name
+  location            = var.zone
   deletion_protection = true
 
   # Remove the default node pool immediately and manage it separately
@@ -23,16 +23,41 @@ resource "google_container_cluster" "main" {
     master_ipv4_cidr_block  = "172.16.0.0/28"
   }
 
-  # IAP TCP forwarding range — the only path to the control plane
+  # The control plane is fully private (enable_private_endpoint = true), so
+  # authorized networks must be internal/RFC1918 ranges — a public range like
+  # the IAP forwarding block (35.235.240.0/20) is rejected here. IAP tunnels to
+  # a VM, not to the control plane, so the only path in is:
+  #   you -> IAP tunnel -> bastion/proxy VM in this subnet -> control plane.
+  # The connection therefore originates from the bastion's internal IP, so we
+  # authorize the internal subnet range.
   master_authorized_networks_config {
     cidr_blocks {
-      cidr_block   = "35.235.240.0/20"
-      display_name = "iap-tcp-forwarding"
+      cidr_block   = var.subnet_cidr
+      display_name = "internal-subnet-bastion"
     }
   }
 
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"
+  }
+
+  # Encrypt Kubernetes Secrets in etcd with a customer-managed KMS key.
+  database_encryption {
+    state    = "ENCRYPTED"
+    key_name = google_kms_crypto_key.gke_etcd.id
+  }
+
+  # Enforce Kubernetes NetworkPolicy with Calico. (Dataplane V2 is the
+  # preferred long-term option but cannot be enabled in place on an existing
+  # cluster — it requires cluster recreation.)
+  network_policy {
+    enabled  = true
+    provider = "CALICO"
+  }
+
+  # Honor the project's Binary Authorization policy for image admission.
+  binary_authorization {
+    evaluation_mode = "PROJECT_SINGLETON_POLICY_ENFORCE"
   }
 
   release_channel {
@@ -44,6 +69,9 @@ resource "google_container_cluster" "main" {
       disabled = false
     }
     horizontal_pod_autoscaling {
+      disabled = false
+    }
+    network_policy_config {
       disabled = false
     }
   }
@@ -63,6 +91,8 @@ resource "google_container_cluster" "main" {
   lifecycle {
     ignore_changes = [min_master_version]
   }
+
+  depends_on = [google_kms_crypto_key_iam_member.gke_etcd]
 }
 
 resource "google_container_node_pool" "main" {
@@ -86,6 +116,9 @@ resource "google_container_node_pool" "main" {
     disk_size_gb    = 50
     disk_type       = "pd-ssd"
     service_account = google_service_account.gke_node.email
+
+    # Encrypt node boot disks with a customer-managed KMS key.
+    boot_disk_kms_key = google_kms_crypto_key.node_disk.id
 
     # Narrow scopes to match the node SA's granted roles.
     # cloud-platform is intentionally avoided — scopes + IAM roles together
@@ -123,5 +156,6 @@ resource "google_container_node_pool" "main" {
     google_project_iam_member.gke_node_monitoring_viewer,
     google_project_iam_member.gke_node_stackdriver_writer,
     google_service_account_iam_member.tf_sa_node_actas,
+    google_kms_crypto_key_iam_member.node_disk,
   ]
 }
