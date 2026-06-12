@@ -16,12 +16,22 @@ variable "zone" {
 }
 
 variable "terraformer" {
-  description = "Terraform deployment service account email (e.g. name@project.iam.gserviceaccount.com)"
+  description = "Terraform apply service account email — has write permissions (e.g. name@project.iam.gserviceaccount.com)"
   type        = string
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", var.terraformer))
     error_message = "terraformer must be a valid GCP service account email ending in .iam.gserviceaccount.com"
+  }
+}
+
+variable "terraformer_plan" {
+  description = "Terraform plan service account email — read-only, used for plan-only CI runs (e.g. name@project.iam.gserviceaccount.com)"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", var.terraformer_plan))
+    error_message = "terraformer_plan must be a valid GCP service account email ending in .iam.gserviceaccount.com"
   }
 }
 
