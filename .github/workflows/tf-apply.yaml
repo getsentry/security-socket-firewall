@@ -9,6 +9,7 @@ jobs:
   build:
     name: tf apply
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
       id-token: write
