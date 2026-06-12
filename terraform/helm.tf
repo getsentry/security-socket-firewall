@@ -41,11 +41,14 @@ locals {
       } : {}
     )
 
-    # When GCP-managed TLS is active, TLS terminates at the Gateway and pods
-    # serve plain HTTP — disable self-signed cert generation so port 443 is
-    # not silently open on the pods with an unmanaged certificate.
+    # The Socket Firewall container always serves HTTPS on its internal port and
+    # its health check is `curl -fk https://localhost:8443/health`, so it needs a
+    # cert present or the listener (and the probe) never come up. With GCP-managed
+    # TLS the Gateway still terminates the *public* trusted certificate; the pod
+    # keeps a self-signed cert only for the internal Gateway->pod hop (ClusterIP,
+    # not externally reachable).
     tls = local.use_gcp_managed_tls ? {
-      generateSelfSigned = false
+      generateSelfSigned = true
       } : local.tls_secret_name != "" ? {
       generateSelfSigned = false
       existingSecret     = local.tls_secret_name
@@ -119,7 +122,7 @@ resource "helm_release" "socket_firewall" {
   chart      = "socket-firewall"
   version    = var.helm_chart_version
   wait       = true
-  timeout    = 300
+  timeout    = 600
 
   values = [yamlencode(local.helm_values)]
 

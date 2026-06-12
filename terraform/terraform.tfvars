@@ -16,7 +16,7 @@ firewall_domain = "sfw.security.sentry.io."
 replica_count          = 2
 enable_autoscaling     = false
 helm_chart_version     = "0.2.4"
-internal_load_balancer = true
+internal_load_balancer = false
 
 # GCP-managed TLS (default when firewall_domain is set)
 enable_gcp_managed_tls = true
