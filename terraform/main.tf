@@ -40,42 +40,45 @@ provider "google-beta" {
   region  = var.region
 }
 
-# Operational note: the cluster uses a private control-plane endpoint
-# (enable_private_endpoint = true) with only the IAP range authorized. The
-# Kubernetes/Helm providers below — and the kubernetes_manifest resources —
-# talk to that private endpoint, so `terraform apply` must run from inside the
-# VPC or through an IAP tunnel to the API server. It will hang/fail from a
-# runner with no network path to the private endpoint.
+# The control plane is private (enable_private_endpoint = true). Rather than
+# dialing the private endpoint directly (which requires VPC/IAP network access),
+# the Kubernetes-facing providers reach it through fleet Connect Gateway — a
+# Google-fronted, IAM-authenticated proxy that rides the cluster's outbound
+# connect agent. This works identically from a local machine (after `gcloud auth
+# application-default login`) and from a WIF-authenticated CI runner, with no
+# bastion, IAP tunnel, or public control-plane endpoint. The read-only plan SA
+# uses the same path via roles/gkehub.gatewayReader.
+#
+# Connect Gateway terminates TLS with Google's public certificate, so no
+# cluster_ca_certificate is supplied — only host + a short-lived access token.
+locals {
+  connect_gateway_host = "https://connectgateway.googleapis.com/v1/projects/${data.google_project.main.number}/locations/global/gkeMemberships/${google_gke_hub_membership.main.membership_id}"
+}
+
 provider "kubernetes" {
-  host                   = "https://${google_container_cluster.main.endpoint}"
-  token                  = data.google_client_config.default.access_token
-  cluster_ca_certificate = base64decode(google_container_cluster.main.master_auth[0].cluster_ca_certificate)
+  host  = local.connect_gateway_host
+  token = data.google_client_config.default.access_token
 }
 
 provider "helm" {
   kubernetes {
-    host                   = "https://${google_container_cluster.main.endpoint}"
-    token                  = data.google_client_config.default.access_token
-    cluster_ca_certificate = base64decode(google_container_cluster.main.master_auth[0].cluster_ca_certificate)
+    host  = local.connect_gateway_host
+    token = data.google_client_config.default.access_token
   }
 }
 
-# Gateway API manifests use kubectl_manifest instead of kubernetes_manifest:
-# kubernetes_manifest performs a live API call during `plan`, which fails on a
-# first apply because the cluster endpoint is still unknown. kubectl_manifest
-# defers entirely to apply time.
-#
-# lazy_load = true is required because alekc/kubectl >= 2.3.0 validates its
-# config eagerly during `plan`. Since host/token/cert come from the cluster
-# created in this same apply (empty until apply), eager validation fails with
-# "no configuration has been provided". lazy_load defers client construction to
-# apply time, matching the hashicorp kubernetes/helm provider behavior.
+# kubectl_manifest is used for the Gateway API resources (kubernetes_manifest
+# performs a live API call during `plan`, which fails before the cluster exists).
+# lazy_load = true defers client construction to apply time, since the gateway
+# host depends on the membership created in this same apply. apply_retry_count
+# absorbs the brief window after membership creation before the connect agent
+# is routable.
 provider "kubectl" {
-  host                   = "https://${google_container_cluster.main.endpoint}"
-  token                  = data.google_client_config.default.access_token
-  cluster_ca_certificate = base64decode(google_container_cluster.main.master_auth[0].cluster_ca_certificate)
-  load_config_file       = false
-  lazy_load              = true
+  host              = local.connect_gateway_host
+  token             = data.google_client_config.default.access_token
+  load_config_file  = false
+  lazy_load         = true
+  apply_retry_count = 5
 }
 
 data "google_client_config" "default" {}
