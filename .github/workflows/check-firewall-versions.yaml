@@ -1,0 +1,113 @@
+name: Check Firewall Versions
+
+on:
+  schedule:
+    # Mondays at 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+jobs:
+  bump-versions:
+    name: bump chart and image versions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get github commit token
+        id: commit_token
+        uses: getsentry/action-github-app-token@5c1e90706fe007857338ac1bfbd7a4177db2f789  # v4.0.0
+        with:
+          app_id: ${{ vars.SENTRY_INTERNAL_APP_ID }}
+          private_key: ${{ secrets.SENTRY_INTERNAL_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check for newer chart and image versions
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          TF=terraform/variables.tf
+
+          read_default() {
+            sed -n "/variable \"$1\"/,/}/p" "$TF" | grep 'default' | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+          }
+
+          set_default() {
+            sed -i "/variable \"$1\"/,/}/ s/default *= *\"[^\"]*\"/default     = \"$2\"/" "$TF"
+          }
+
+          newer_than() {
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ] && [ "$1" != "$2" ]
+          }
+
+          current_chart=$(read_default helm_chart_version)
+          current_image=$(read_default firewall_image_tag)
+
+          latest_chart=$(curl -fsSL https://socketdev-demo.github.io/socket-firewall-helm/index.yaml \
+            | grep -E '^\s+version:' | awk '{print $2}' | sort -V | tail -1)
+
+          latest_image=""
+          url="https://hub.docker.com/v2/repositories/socketdev/socket-registry-firewall/tags?page_size=100"
+          while [ -n "$url" ]; do
+            resp=$(curl -fsSL "$url")
+            page=$(echo "$resp" | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+            [ -n "$page" ] && latest_image=$(printf '%s\n%s\n' "$latest_image" "$page" | grep . | sort -V | tail -1)
+            url=$(echo "$resp" | jq -r '.next // empty')
+          done
+
+          echo "helm chart: $current_chart -> $latest_chart"
+          echo "image tag:  $current_image -> $latest_image"
+
+          summary=""
+          if newer_than "$current_chart" "$latest_chart"; then
+            set_default helm_chart_version "$latest_chart"
+            summary+="- \`helm_chart_version\`: \`$current_chart\` → \`$latest_chart\`"$'\n'
+          fi
+          if newer_than "$current_image" "$latest_image"; then
+            set_default firewall_image_tag "$latest_image"
+            summary+="- \`firewall_image_tag\`: \`$current_image\` → \`$latest_image\`"$'\n'
+          fi
+
+          if [ -z "$summary" ]; then
+            echo "No updates available."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "updated=true"
+            echo "summary<<EOF"
+            printf '%s' "$summary"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Open PR if changes
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.commit_token.outputs.token }}
+          branch: chore/bump-firewall-versions-${{ github.sha }}
+          title: "chore: bump socket-firewall chart and image versions"
+          commit-message: "chore: bump socket-firewall chart and image versions"
+          body: |
+            Automated weekly version check found newer releases.
+
+            ## Updates
+            ${{ steps.check.outputs.summary }}
+
+            ## Follow-up
+            - Review the `terraform plan` check on this PR.
+            - If you override versions in `terraform/terraform.tfvars`, update those values to match before merging.
+            - Confirm the new image is allowed by Binary Authorization before merging to `main`.
+
+            Triggered by [check-firewall-versions](.github/workflows/check-firewall-versions.yaml).
+        run: |-
+          git config user.name "getsantry[bot]"
+          git config user.email "66042841+getsantry[bot]@users.noreply.github.com"
+
+          git switch -c "${branch}" -m
+          git add .
+          git commit -m "${commit_message}"
+          git push -u origin "${branch}"
+
+          gh pr create -B main \
+            --title "${title}" \
+            --body "${body}"
