@@ -8,7 +8,7 @@ Infrastructure code lives in [`terraform/`](terraform/).
 
 The deployment runs Socket Firewall on a **private GKE cluster** with a **GKE Gateway**, **Google-managed TLS** via Certificate Manager, **Cloud NAT** for outbound traffic, **CMEK encryption**, **Binary Authorization**, **Calico NetworkPolicies**, and **Secret Manager** for the Socket.dev API token.
 
-The control plane has **no public endpoint and no inbound path** (private endpoint, `172.16.0.0/28`). Terraform and `kubectl` reach it through **fleet Connect Gateway** — the cluster's GKE-managed Connect agent opens an *outbound* channel to Google, and `connectgateway.googleapis.com` proxies IAM-authenticated traffic back down it. This works identically from a local machine and from a **GitHub-hosted CI runner** with no bastion, IAP tunnel, or VPC peering. CI runs via Workload Identity Federation with two service accounts: a read-only **plan** SA (PR) and a write **apply** SA (push to `main`).
+The control plane has **no public endpoint** (private endpoint, `172.16.0.0/28`); the only inbound networks authorized to reach it are internal (the cluster subnet, `10.10.0.0/24`). Terraform and `kubectl` reach it through **fleet Connect Gateway** — the cluster's GKE-managed Connect agent opens an *outbound* channel to Google, and `connectgateway.googleapis.com` proxies IAM-authenticated traffic back down it. This works identically from a local machine and from a **GitHub-hosted CI runner** with no bastion, IAP tunnel, or VPC peering. CI runs via Workload Identity Federation with two service accounts: a read-only **plan** SA (PR) and a write **apply** SA (push to `main`).
 
 ```mermaid
 flowchart TB
@@ -107,7 +107,7 @@ sequenceDiagram
 | **Terraformer** | service account `socket-firewall-tf-plan@sac-prod-sa.iam.gserviceaccount.com` | Created by security-as-code |
 | **Terraformer** | service account `socket-firewall-tf-apply@sac-prod-sa.iam.gserviceaccount.com` | Created by security-as-code |
 | **Workload Identity Provider** | Used in GitHub Action for GH <> GCP auth | Created by security-as-code |
-| **Secret Value** | Secret `socket-firewall-api-token` | Resource created by terraform, value set in GCP console directly |
+| **Secret Value** | Secret `socket-firewall-api-token` | Resource created by terraform, value added out-of-band via `gcloud secrets versions add` |
 | **DNS mapping** | DNS records for `sfw.security.sentry.io` | Managed in `Team Security` GCP project |
 
 ## Security
@@ -148,7 +148,7 @@ When `firewall_domain` is set, Terraform always provisions GCP-managed TLS:
 5. An **HTTPRoute** — forwards traffic to the firewall pods (backend `port 80`, plain HTTP)
 6. A **HealthCheckPolicy** — points the load-balancer health check at `/health`. Without it the LB defaults to probing `/`, which the firewall does not answer with `200`, so every backend is marked unhealthy (`no healthy upstream`)
 
-The Gateway terminates the public, browser-trusted certificate and forwards to the pods over **plain HTTP on port 80** (cluster-internal `ClusterIP`, never externally reachable). The firewall image nevertheless always configures an HTTPS listener (`:443`) that requires a certificate to load, so the chart's cert-generator init container produces a **self-signed certificate** purely so nginx will boot — it is not on the Gateway's data path.
+The Gateway terminates the public, browser-trusted certificate and forwards to the pods over **plain HTTP on port 80** (cluster-internal `ClusterIP`, never externally reachable). The firewall image nevertheless always configures an HTTPS listener (`:8443`) that requires a certificate to load, so the chart's cert-generator init container produces a **self-signed certificate** purely so nginx will boot — it is not on the Gateway's data path.
 
 ## Terraform layout
 
@@ -252,7 +252,7 @@ The app needs permission to push branches and open pull requests on this repo.
 #### Upgrade flow
 
 1. The workflow opens a PR updating `helm_chart_version` and/or `firewall_image_tag` in `terraform/variables.tf`.
-2. If you override versions in `terraform.tfvars`, update those values to match before merging (CI passes them via `--var-file`).
+2. If you override versions in `terraform.tfvars`, update those values to match before merging — Terraform auto-loads `terraform.tfvars`, so it overrides the `variables.tf` defaults the workflow bumps.
 3. Review the `terraform plan` check on the PR — expect a Helm release change and pod rollout.
 4. Confirm the new image is allowed by **Binary Authorization** (project singleton policy). If admission blocks the rollout, add the digest to the allow policy before merging.
 5. Merge to `main` → `tf-apply` rolls out the new version.

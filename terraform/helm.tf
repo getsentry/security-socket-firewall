@@ -5,7 +5,8 @@ locals {
     replicaCount = var.replica_count
 
     # Pin the image tag explicitly instead of inheriting the chart default (latest).
-    # Version bumps are proposed by Renovate and rolled out via terraform plan/apply.
+    # Version bumps are proposed by the check-firewall-versions workflow and
+    # rolled out via terraform plan/apply.
     image = {
       repository = "socketdev/socket-registry-firewall"
       tag        = var.firewall_image_tag
