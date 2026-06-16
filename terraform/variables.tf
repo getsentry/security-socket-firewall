@@ -127,16 +127,16 @@ variable "helm_chart_version" {
   default     = "0.2.4"
 }
 
-variable "replica_count" {
-  description = "Number of firewall pod replicas"
-  type        = number
-  default     = 2
+variable "firewall_image_tag" {
+  description = "Container image tag for socketdev/socket-registry-firewall (pinned for reproducible rollouts; bumped by check-firewall-versions workflow)"
+  type        = string
+  default     = "1.1.159"
 }
 
-variable "enable_autoscaling" {
-  description = "Enable HPA for the firewall deployment"
-  type        = bool
-  default     = false
+variable "replica_count" {
+  description = "Number of firewall pod replicas (ignored when HPA is enabled; used as a baseline for the chart)"
+  type        = number
+  default     = 2
 }
 
 variable "enable_network_policies" {
@@ -169,35 +169,4 @@ variable "path_routing_routes" {
       registry = "maven"
     },
   ]
-}
-
-variable "internal_load_balancer" {
-  description = "Provision an internal GCP LoadBalancer (VPC-only access)"
-  type        = bool
-  default     = true
-}
-
-
-variable "enable_gcp_managed_tls" {
-  description = "When true and firewall_domain is set, provision a Google-managed TLS certificate via Certificate Manager and terminate HTTPS at a GKE Gateway."
-  type        = bool
-  default     = true
-}
-
-variable "tls_existing_secret" {
-  description = "Name of an existing Kubernetes TLS secret (tls.crt/tls.key). When set, bypasses GCP-managed TLS and mounts the secret in pods."
-  type        = string
-  default     = ""
-}
-
-variable "tls_cert_manager_format" {
-  description = "Set true when tls_existing_secret uses cert-manager key names (fullchain.pem/privkey.pem)"
-  type        = bool
-  default     = true
-}
-
-variable "tls_include_ca_crt" {
-  description = "Mount ca.crt from the TLS secret. Set false for ACME/Let's Encrypt issuers."
-  type        = bool
-  default     = false
 }

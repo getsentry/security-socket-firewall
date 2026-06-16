@@ -1,13 +1,19 @@
 locals {
   firewall_domain = trim(var.firewall_domain, ".")
 
-  tls_secret_name = var.tls_existing_secret != "" ? var.tls_existing_secret : ""
-
   helm_values = {
     replicaCount = var.replica_count
 
+    # Pin the image tag explicitly instead of inheriting the chart default (latest).
+    # Version bumps are proposed by Renovate and rolled out via terraform plan/apply.
+    image = {
+      repository = "socketdev/socket-registry-firewall"
+      tag        = var.firewall_image_tag
+      pullPolicy = "IfNotPresent"
+    }
+
     autoscaling = {
-      enabled = var.enable_autoscaling
+      enabled = true
     }
 
     # The socket-registry-firewall:1.1.159 image runs as UID 1001, but the
@@ -55,19 +61,12 @@ locals {
       routes  = []
     }
 
-    service = merge(
-      {
-        type = local.use_gcp_managed_tls ? "ClusterIP" : "LoadBalancer"
-      },
-      local.use_gcp_managed_tls ? {
-        httpsTargetPort = "http"
-      } : {},
-      (!local.use_gcp_managed_tls && var.internal_load_balancer) ? {
-        annotations = {
-          "networking.gke.io/load-balancer-type" = "Internal"
-        }
-      } : {}
-    )
+    service = local.use_gcp_managed_tls ? {
+      type            = "ClusterIP"
+      httpsTargetPort = "http"
+      } : {
+      type = "LoadBalancer"
+    }
 
     # The Socket Firewall container always serves HTTPS on its internal port and
     # its health check is `curl -fk https://localhost:8443/health`, so it needs a
@@ -75,14 +74,7 @@ locals {
     # TLS the Gateway still terminates the *public* trusted certificate; the pod
     # keeps a self-signed cert only for the internal Gateway->pod hop (ClusterIP,
     # not externally reachable).
-    tls = local.use_gcp_managed_tls ? {
-      generateSelfSigned = true
-      } : local.tls_secret_name != "" ? {
-      generateSelfSigned = false
-      existingSecret     = local.tls_secret_name
-      certManager        = var.tls_cert_manager_format
-      includeCaCrt       = var.tls_include_ca_crt
-      } : {
+    tls = {
       generateSelfSigned = true
     }
 

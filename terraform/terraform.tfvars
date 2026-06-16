@@ -13,13 +13,6 @@ node_max_count    = 3
 
 firewall_domain = "sfw.security.sentry.io."
 
-replica_count          = 2
-enable_autoscaling     = false
-helm_chart_version     = "0.2.4"
-internal_load_balancer = false
-
-# GCP-managed TLS (default when firewall_domain is set)
-enable_gcp_managed_tls = true
-
-# Override: use a pre-existing Kubernetes TLS secret instead
-# tls_existing_secret = "socket-firewall-tls"
+replica_count      = 2
+helm_chart_version = "0.2.4"
+firewall_image_tag = "1.1.159"

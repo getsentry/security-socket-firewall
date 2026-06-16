@@ -2,8 +2,8 @@
 # GCP-managed TLS (Certificate Manager + GKE Gateway)
 # ---------------------------------------------------------------------------
 # When firewall_domain is set, Google issues and renews the certificate via
-# Certificate Manager (DNS authorization). TLS terminates at the GKE Gateway
-# load balancer; pods serve plain HTTP behind it.
+# Certificate Manager (DNS authorization). TLS terminates at the external GKE
+# Gateway load balancer; pods serve plain HTTP behind it.
 #
 # After apply, publish the dns_authorization_record CNAME in your DNS zone so
 # Google can validate domain ownership. Once the certificate is ACTIVE, point
@@ -11,13 +11,7 @@
 # ---------------------------------------------------------------------------
 
 locals {
-  use_gcp_managed_tls = (
-    local.firewall_domain != ""
-    && var.tls_existing_secret == ""
-    && var.enable_gcp_managed_tls
-  )
-
-  gateway_class = var.internal_load_balancer ? "gke-l7-rilb" : "gke-l7-global-external-managed"
+  use_gcp_managed_tls = local.firewall_domain != ""
 }
 
 resource "google_certificate_manager_dns_authorization" "firewall" {
@@ -79,7 +73,7 @@ resource "kubectl_manifest" "socket_firewall_gateway" {
       }
     }
     spec = {
-      gatewayClassName = local.gateway_class
+      gatewayClassName = "gke-l7-global-external-managed"
       listeners = [
         {
           name     = "https"
@@ -124,37 +118,13 @@ data "kubernetes_resource" "firewall_gateway" {
   depends_on = [kubectl_manifest.socket_firewall_gateway]
 }
 
-# ---------------------------------------------------------------------------
-# Enforce a minimum TLS version (1.2) on the Gateway via an SSL policy.
-# Regional cluster gateways (gke-l7-rilb) need a regional SSL policy; global
-# external gateways need a global one.
-# ---------------------------------------------------------------------------
-
-resource "google_compute_region_ssl_policy" "firewall" {
-  count = local.use_gcp_managed_tls && var.internal_load_balancer ? 1 : 0
-
-  name            = "${var.cluster_name}-ssl-policy"
-  region          = var.region
-  project         = var.project_id
-  profile         = "MODERN"
-  min_tls_version = "TLS_1_2"
-}
-
 resource "google_compute_ssl_policy" "firewall" {
-  count = local.use_gcp_managed_tls && !var.internal_load_balancer ? 1 : 0
+  count = local.use_gcp_managed_tls ? 1 : 0
 
   name            = "${var.cluster_name}-ssl-policy"
   project         = var.project_id
   profile         = "MODERN"
   min_tls_version = "TLS_1_2"
-}
-
-locals {
-  ssl_policy_name = local.use_gcp_managed_tls ? (
-    var.internal_load_balancer
-    ? google_compute_region_ssl_policy.firewall[0].name
-    : google_compute_ssl_policy.firewall[0].name
-  ) : ""
 }
 
 resource "kubectl_manifest" "socket_firewall_gateway_policy" {
@@ -169,7 +139,7 @@ resource "kubectl_manifest" "socket_firewall_gateway_policy" {
     }
     spec = {
       default = {
-        sslPolicy = local.ssl_policy_name
+        sslPolicy = google_compute_ssl_policy.firewall[0].name
       }
       targetRef = {
         group = "gateway.networking.k8s.io"
