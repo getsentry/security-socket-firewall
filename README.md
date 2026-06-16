@@ -12,132 +12,57 @@ The control plane has **no public endpoint and no inbound path** (private endpoi
 
 ```mermaid
 flowchart TB
-    subgraph TF["Terraform (state: GCS)"]
-        TF_APPLY["Apply SA (WIF)<br/>tf-apply@... (write)"]
-        TF_PLAN["Plan SA (WIF)<br/>tf-plan@... (read-only)"]
-        GCS["GCS Backend<br/>sac-prod-tf--socket-firewall"]
-    end
+    ADMIN["Admin / CI<br/>terraform + kubectl<br/>(WIF / impersonation)"]
+    CLIENTS["Clients<br/>npm / pypi / maven"]
+    UPSTREAM["Socket.dev API +<br/>upstream registries"]
 
     subgraph GCP["GCP Project"]
-        subgraph KMS["Cloud KMS"]
-            KEYRING["Key ring<br/>etcd / node disk / secret"]
+        CGW["Connect Gateway<br/>(IAM-auth, no public endpoint)"]
+
+        subgraph VPC["VPC (private, egress: TCP 443 only)"]
+            GW["GKE Gateway<br/>Google-managed TLS"]
+            PODS["Socket Firewall pods<br/>ClusterIP :80, replicas 2"]
+            CP["Private control plane<br/>172.16.0.0/28"]
+            NAT["Cloud NAT"]
         end
 
-        subgraph CM["Certificate Manager"]
-            DNS_AUTH["DNS Authorization"]
-            CERT["Managed Certificate"]
-            CERT_MAP["Certificate Map"]
-            SSL["SSL Policy<br/>MODERN, TLS 1.2+"]
-        end
-
-        subgraph SM["Secret Manager (CMEK)"]
-            API_SECRET["socket-firewall-api-token"]
-        end
-
-        subgraph VPC["VPC: socket-firewall-vpc"]
-            subgraph SUBNET["Subnet + VPC flow logs<br/>10.10.0.0/24"]
-                subgraph GKE["GKE Private Cluster: socket-firewall"]
-                    subgraph NS["Namespace: socket-firewall"]
-                        GW["GKE Gateway<br/>rilb (internal) / global-external"]
-                        GW_POLICY["GCPGatewayPolicy"]
-                        ROUTE["HTTPRoute"]
-                        NETPOL["NetworkPolicies<br/>deny ingress by default"]
-                        HELM["Helm: socket-firewall"]
-                        PODS["Firewall Pods<br/>replicas: 2, HTTPS :8443<br/>(self-signed internal cert)"]
-                        PDB["PodDisruptionBudget"]
-                        K8S_SECRET["K8s Secret<br/>socket-api-token"]
-                        SVC["Service: ClusterIP"]
-                    end
-                    NODES["Node Pool<br/>CMEK disks, shielded<br/>Binary Auth enforced"]
-                    CONNECT["Connect agent<br/>(fleet membership)"]
-                end
-                NAT["Cloud Router + Cloud NAT<br/>subnet-scoped"]
-                FW_DENY["Firewall: deny all egress<br/>priority 65534"]
-                FW_ALLOW["Firewall: allow egress<br/>TCP 443 only"]
-            end
-            CP["Private Control Plane<br/>172.16.0.0/28 (no public endpoint)<br/>auth: internal subnet only<br/>etcd encrypted (CMEK)"]
-        end
-
-        NODE_SA["GKE Node SA<br/>logging + monitoring roles"]
-        CGW["Connect Gateway<br/>connectgateway.googleapis.com<br/>(IAM-auth proxy)"]
+        SECRETS["Secret Manager + KMS<br/>(CMEK at rest)"]
     end
 
-    subgraph EXTERNAL["External"]
-        CLIENTS["Clients<br/>CI/CD, dev machines"]
-        DNS["DNS provider"]
-        REGISTRIES["Upstream registries<br/>npm / pypi / maven"]
-        SOCKET_API["Socket.dev API"]
-        ADMIN["Admin / CI<br/>kubectl / terraform"]
-    end
-
-    TF_APPLY --> GCS
-    TF_PLAN --> GCS
-    TF_APPLY --> GCP
-    KMS --> SM
-    KMS --> GKE
-    KMS --> NODES
-    TF_APPLY --> API_SECRET
-    TF_APPLY --> CM
-    DNS_AUTH --> DNS
-    CERT --> CERT_MAP
-    CERT_MAP --> GW
-    SSL --> GW_POLICY --> GW
-    API_SECRET --> K8S_SECRET
-    K8S_SECRET --> HELM
-    HELM --> PODS
-    NETPOL --> PODS
-    PDB --> PODS
-    PODS --> SVC
-    GW --> ROUTE --> SVC
-    NODES --> PODS
-    NODE_SA --> NODES
-
-    CLIENTS -->|"HTTPS (TLS at gateway)"| GW
-    PODS -->|"scan packages"| SOCKET_API
-    PODS -->|"proxy /npm, /pypi, /maven"| REGISTRIES
-    NODES --> FW_DENY
-    NODES --> FW_ALLOW --> NAT --> REGISTRIES
-    NODES --> NAT --> SOCKET_API
-    ADMIN -->|"IAM-auth kubectl/terraform"| CGW
-    CONNECT -.->|"outbound channel"| CGW
-    CGW -.->|"proxied to private endpoint"| CP
+    ADMIN -->|IAM-auth| CGW
+    CGW -.->|proxied| CP
+    CLIENTS -->|HTTPS| GW
+    GW --> PODS
+    PODS --> NAT
+    NAT --> UPSTREAM
+    SECRETS --> PODS
 ```
+
+Full resource detail (Certificate Manager, SSL policy, NetworkPolicies, node SA, firewall rules, etc.) is described in the [Components](#components), [Security](#security), and [Terraform layout](#terraform-layout) sections below.
 
 ## Network topology
 
 ```mermaid
 flowchart LR
-    subgraph VPC["socket-firewall-vpc"]
-        subgraph SUB["socket-firewall-subnet (10.10.0.0/24)<br/>VPC flow logs enabled"]
-            direction TB
-            N1["GKE Nodes<br/>private IPs only"]
-            GW_IP["GKE Gateway IP<br/>internal or external HTTPS LB"]
-            SVC["ClusterIP Service<br/>socket-firewall :80"]
-        end
+    CLIENT["Clients"]
+    ADMIN["Admin / CI<br/>terraform · kubectl"]
+    CGW["Connect Gateway"]
+    INTERNET["Internet<br/>Socket.dev · registries"]
 
-        subgraph RANGES["Secondary IP ranges"]
-            PODS["pods: 10.20.0.0/16"]
-            SVC_CIDR["services: 10.30.0.0/16"]
+    subgraph VPC["VPC: socket-firewall-vpc"]
+        subgraph SUB["subnet 10.10.0.0/24<br/>pods 10.20.0.0/16 · svc 10.30.0.0/16"]
+            NODES["GKE nodes (private)<br/>firewall pods · ClusterIP :80"]
         end
-
-        ROUTER["Cloud Router"]
-        NAT["Cloud NAT<br/>subnet-scoped"]
-        MASTER["Control plane<br/>172.16.0.0/28<br/>private endpoint"]
+        NAT["Cloud NAT"]
+        MASTER["Control plane<br/>172.16.0.0/28 (private)"]
     end
 
-    INTERNET["Internet"]
-    CGW["Connect Gateway<br/>(IAM-auth proxy)"]
-    ADMIN["Admin / CI<br/>kubectl / terraform"]
-    CLIENT["Clients"]
-
-    N1 --- PODS
-    N1 --- SVC_CIDR
-    N1 --> ROUTER --> NAT --> INTERNET
-    CLIENT -->|"HTTPS :443"| GW_IP --> SVC --> N1
-    N1 -.->|"connect agent (outbound 443)"| CGW
-    ADMIN -->|"IAM-auth"| CGW
-    CGW -.->|"proxied"| MASTER
-    N1 -.->|"private nodes"| MASTER
+    CLIENT -->|HTTPS| NODES
+    NODES -->|egress 443 only| NAT
+    NAT --> INTERNET
+    NODES -.->|private| MASTER
+    ADMIN -->|IAM-auth| CGW
+    CGW -.->|proxied| MASTER
 ```
 
 Egress from GKE nodes is **deny-by-default** at the VPC firewall layer. Only **TCP 443** is permitted outbound (HTTPS to Socket.dev and upstream registries, and the fleet Connect agent's outbound channel to Google). Port 80 is intentionally blocked.
@@ -149,19 +74,12 @@ sequenceDiagram
     participant Dev as Developer / CI
     participant GW as GKE Gateway
     participant FW as Socket Firewall Pod
-    participant CM as Certificate Manager
-    participant SM as Secret Manager
-    participant Socket as Socket.dev API
-    participant Reg as Upstream Registry
+    participant Up as Socket.dev API / Registry
 
-    Note over CM: DNS CNAME validates domain<br/>Google issues & renews cert (TLS 1.2+)
-    Note over SM: CMEK-encrypted secret<br/>gcloud secrets versions add ...
-    SM->>FW: K8s secret sync (Terraform)
     Dev->>GW: GET https://sfw.example.com/npm/...
-    GW->>FW: HTTPS to ClusterIP (pod self-signed cert)
-    FW->>Socket: Security scan API (HTTPS)
-    FW->>Reg: Proxy package download (HTTPS)
-    Reg-->>FW: Package artifact
+    GW->>FW: HTTP :80 (public TLS terminated at gateway)
+    FW->>Up: Scan (Socket.dev) + proxy download (registry)
+    Up-->>FW: Verdict + package artifact
     FW-->>Dev: Scanned / allowed response
 ```
 
@@ -169,18 +87,28 @@ sequenceDiagram
 
 | Layer | Resource | Purpose |
 |-------|----------|---------|
-| **State** | GCS `sac-prod-tf--socket-firewall` | Remote Terraform state |
 | **Network** | VPC + subnet + secondary ranges | Isolated network; subnet has VPC flow logs |
 | **Egress** | Deny-all + allow TCP 443 + Cloud NAT | Default-deny egress; HTTPS-only outbound via NAT scoped to the subnet |
 | **Compute** | Private GKE cluster + node pool | Shielded nodes, deletion protection, Calico NetworkPolicy, Binary Authorization |
 | **Encryption** | Cloud KMS key ring (3 keys) | CMEK for etcd secrets, node boot disks, and Secret Manager |
 | **Access** | Fleet membership + Connect Gateway | IAM-authenticated proxy to the private control plane; no public endpoint, bastion, or IAP tunnel |
-| **App** | Helm `socket-firewall` | Package firewall with path-based routing, pod anti-affinity, PDB |
-| **Exposure** | GKE Gateway or `LoadBalancer` Service | Internal (`gke-l7-rilb`) or external (`gke-l7-global-external-managed`) via `internal_load_balancer` |
+| **App** | Helm `socket-firewall` | Package firewall with path-based routing, HPA, pod anti-affinity, PDB |
+| **Exposure** | GKE Gateway (`gke-l7-global-external-managed`) | External HTTPS when `firewall_domain` is set; `LoadBalancer` Service fallback when domain is unset |
 | **Secrets** | Secret Manager (CMEK) → K8s secret | `SOCKET_SECURITY_API_TOKEN` for Socket.dev |
 | **TLS** | Certificate Manager + GKE Gateway + SSL policy | Google-managed cert; HTTPS terminates at the LB (TLS 1.2 minimum) |
 | **Policy** | Kubernetes NetworkPolicies | Default-deny ingress in the firewall namespace (`enable_network_policies = true`) |
 | **IAM** | GKE node SA + custom Terraform roles | Least-privilege; separate read-only plan SA and write apply SA, both via WIF |
+
+### Resources managed outside of this repo
+
+| Layer | Note | Source |
+|-------|----------|---------|
+| **State** | GCS `sac-prod-tf--socket-firewall` | Created by security-as-code |
+| **Terraformer** | service account `socket-firewall-tf-plan@sac-prod-sa.iam.gserviceaccount.com` | Created by security-as-code |
+| **Terraformer** | service account `socket-firewall-tf-apply@sac-prod-sa.iam.gserviceaccount.com` | Created by security-as-code |
+| **Workload Identity Provider** | Used in GitHub Action for GH <> GCP auth | Created by security-as-code |
+| **Secret Value** | Secret `socket-firewall-api-token` | Resource created by terraform, value set in GCP console directly |
+| **DNS mapping** | DNS records for `sfw.security.sentry.io` | Managed in `Team Security` GCP project |
 
 ## Security
 
@@ -193,7 +121,7 @@ sequenceDiagram
 | **Image admission** | Binary Authorization (`PROJECT_SINGLETON_POLICY_ENFORCE`) |
 | **Node hardening** | Shielded VMs, dedicated node SA (no `cloud-platform` scope), Workload Identity, legacy metadata endpoints disabled |
 | **Control plane** | Private endpoint only — no public API server; reachable solely via Connect Gateway (IAM-authenticated) |
-| **Availability** | Pod anti-affinity across nodes, PodDisruptionBudget (`minAvailable: 1`), 2-node minimum |
+| **Availability** | HPA, pod anti-affinity, PodDisruptionBudget (`minAvailable: 1`), 2-node minimum |
 | **IAM least privilege** | Custom Terraform roles replace `container.admin`/`secretmanager.secretAdmin`/`cloudkms.admin` (no project-wide secret payload access); read-only plan SA distinct from write apply SA; fleet write access is bootstrap-only |
 | **Audit** | VPC flow logs and firewall rule logging with full metadata |
 
@@ -211,17 +139,16 @@ Health check endpoint: `https://<firewall_domain>/health`
 
 ## TLS
 
-When `firewall_domain` is set and `enable_gcp_managed_tls = true` (default), Terraform provisions:
+When `firewall_domain` is set, Terraform always provisions GCP-managed TLS:
 
 1. A **Certificate Manager DNS authorization** — publish the CNAME from `terraform output tls_dns_authorization_record`
 2. A **Google-managed certificate** — becomes `ACTIVE` after DNS validation (typically 15–60 minutes)
-3. A **GKE Gateway** with a **certificate map** — terminates the public HTTPS at the load balancer (internal `gke-l7-rilb` or external `gke-l7-global-external-managed`, selected by `internal_load_balancer`)
-4. An **SSL policy** (`MODERN`, TLS 1.2 minimum) attached via **GCPGatewayPolicy** — regional for internal gateways, global for external
-5. An **HTTPRoute** — forwards traffic to the firewall pods
+3. An **external GKE Gateway** (`gke-l7-global-external-managed`) with a **certificate map** — terminates public HTTPS at the load balancer. When using the certmap annotation the listener has **no `tls` block** (TLS is configured entirely by the annotation; adding a `tls` section is rejected)
+4. A **global SSL policy** (`MODERN`, TLS 1.2 minimum) attached via **GCPGatewayPolicy**
+5. An **HTTPRoute** — forwards traffic to the firewall pods (backend `port 80`, plain HTTP)
+6. A **HealthCheckPolicy** — points the load-balancer health check at `/health`. Without it the LB defaults to probing `/`, which the firewall does not answer with `200`, so every backend is marked unhealthy (`no healthy upstream`)
 
-The Gateway terminates the public, browser-trusted certificate. The Socket Firewall container always serves HTTPS on its internal port (`:8443`, the target of its own health probe), so the pod keeps a **self-signed certificate** for the internal Gateway→pod hop even when GCP-managed TLS is enabled. That hop is over the cluster-internal `ClusterIP` and is never externally reachable.
-
-To use a pre-existing Kubernetes TLS secret instead (pod-level TLS with a `LoadBalancer` Service), set `enable_gcp_managed_tls = false` and `tls_existing_secret = "<secret-name>"`.
+The Gateway terminates the public, browser-trusted certificate and forwards to the pods over **plain HTTP on port 80** (cluster-internal `ClusterIP`, never externally reachable). The firewall image nevertheless always configures an HTTPS listener (`:443`) that requires a certificate to load, so the chart's cert-generator init container produces a **self-signed certificate** purely so nginx will boot — it is not on the Gateway's data path.
 
 ## Terraform layout
 
@@ -236,8 +163,8 @@ To use a pre-existing Kubernetes TLS secret instead (pod-level TLS with a `LoadB
 | [`fleet.tf`](terraform/fleet.tf) | Fleet (GKE Hub) membership enabling Connect Gateway access to the private control plane |
 | [`iam.tf`](terraform/iam.tf) | GKE node SA, custom least-privilege Terraform roles (apply + plan SA), IAM bindings |
 | [`secrets.tf`](terraform/secrets.tf) | CMEK-encrypted Secret Manager secret for the Socket API token |
-| [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release, PodDisruptionBudget |
-| [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute |
+| [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release (incl. pod `securityContext`/`fsGroup` so nginx can read the generated cert key) |
+| [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute, HealthCheckPolicy |
 | [`variables.tf`](terraform/variables.tf) | Input variables |
 | [`outputs.tf`](terraform/outputs.tf) | Cluster credentials, gateway IP, DNS auth record, health URL |
 
@@ -247,9 +174,11 @@ To use a pre-existing Kubernetes TLS secret instead (pod-level TLS with a `LoadB
 
 - A GCP project with billing enabled
 - Two Terraform service accounts — a write **apply** SA (`terraformer`) and a read-only **plan** SA (`terraformer_plan`) — bootstrapped as described below
-- Workload Identity Federation configured for the GitHub repo if you use the CI workflows (`WIF_PROVIDER`, `WIF_APPLY_SERVICE_ACCOUNT`, `WIF_PLAN_SERVICE_ACCOUNT`)
+  - For sentry internal use, theses are created and managed in [security-as-code](https://github.com/getsentry/security-as-code)
+- Workload Identity Federation configured for the GitHub repo (`WIF_PROVIDER`, `WIF_APPLY_SERVICE_ACCOUNT`, `WIF_PLAN_SERVICE_ACCOUNT`)
+  - For sentry internal use, theses are created and managed in [security-as-code](https://github.com/getsentry/security-as-code)
 
-No VPC peering, bastion, or IAP tunnel is required. The private control plane is reached over **fleet Connect Gateway**, so `terraform apply` and `kubectl` work from a local machine or a GitHub-hosted runner once the SA is authenticated (`gcloud auth application-default login` locally, or WIF in CI).
+No VPC peering, bastion, or IAP tunnel is required. The private control plane is reached over **fleet Connect Gateway**, so `terraform apply` and `kubectl` work from a local machine or a GitHub-hosted runner once the SA is authenticated.
 
 ### Bootstrap IAM
 
@@ -281,24 +210,61 @@ Because Terraform creates these custom roles and bindings on the first apply, th
 | `roles/serviceusage.serviceUsageAdmin` | Enable the required APIs (`apis.tf`) | Keep |
 | `roles/gkehub.editor` | Register the fleet membership (`fleet.tf`, `memberships.create`) | **Revoke** — steady-state only refreshes it via `gkehub.viewer` |
 
-Also grant the **plan SA** read access to the Terraform state bucket (it cannot be managed in code, since it is the backend):
-
-```bash
-gsutil iam ch serviceAccount:<PLAN_SA_EMAIL>:objectViewer gs://sac-prod-tf--socket-firewall
-```
-
 ### CI/CD
 
-Two GitHub Actions workflows authenticate via Workload Identity Federation (no long-lived keys):
+GitHub Actions workflows for infrastructure and version management:
 
 | Workflow | Trigger | Identity | Action |
 |----------|---------|----------|--------|
-| [`tf-plan.yaml`](.github/workflows/tf-plan.yaml) | Pull request to `main` | Plan SA (read-only) | `terraform plan`, posts diff as a PR comment |
-| [`tf-apply.yaml`](.github/workflows/tf-apply.yaml) | Push to `main` | Apply SA (write) | `terraform apply -auto-approve` (in the `production` environment) |
+| [`tf-plan.yaml`](.github/workflows/tf-plan.yaml) | Pull request to `main` | Plan SA (read-only, WIF) | `terraform plan`, posts diff as a PR comment |
+| [`tf-apply.yaml`](.github/workflows/tf-apply.yaml) | Push to `main` | Apply SA (write, WIF) | `terraform apply -auto-approve` (in the `production` environment) |
+| [`check-firewall-versions.yaml`](.github/workflows/check-firewall-versions.yaml) | Weekly (Mon 09:00 UTC) + manual | GitHub App (`getsantry[bot]`) | Check upstream chart/image releases; open a PR if newer versions exist |
 
-Both runners are GitHub-hosted and reach the private control plane through Connect Gateway — no self-hosted runner inside the VPC is needed.
+Terraform plan/apply runners are GitHub-hosted and reach the private control plane through Connect Gateway — no self-hosted runner inside the VPC is needed.
+
+### Chart and image version updates
+
+The firewall image tag (`firewall_image_tag`) and Helm chart version (`helm_chart_version`) are **pinned in Terraform** — the chart’s default `latest` tag is not used. See [`helm.tf`](terraform/helm.tf).
+
+| Variable | Default (in `variables.tf`) | Upstream source |
+|----------|----------------------------|-----------------|
+| `helm_chart_version` | `0.2.4` | [socket-firewall Helm index](https://socketdev-demo.github.io/socket-firewall-helm/index.yaml) |
+| `firewall_image_tag` | `1.1.159` | [`socketdev/socket-registry-firewall`](https://hub.docker.com/r/socketdev/socket-registry-firewall) on Docker Hub |
+
+#### Automated checks
+
+[`check-firewall-versions.yaml`](.github/workflows/check-firewall-versions.yaml) runs on a schedule and can be triggered manually:
+
+- **Schedule:** Mondays at 09:00 UTC
+- **Manual run:** **Actions → Check Firewall Versions → Run workflow**
+
+The workflow fetches the latest Helm chart version and the highest `x.y.z` Docker tag, compares them to the defaults in `terraform/variables.tf`, and opens a PR when either is newer. PRs are created by `getsantry[bot]` using a GitHub App token.
+
+**Repository configuration** (for the version-check workflow):
+
+| Setting | Type | Purpose |
+|---------|------|---------|
+| `SENTRY_INTERNAL_APP_ID` | Variable | GitHub App ID used to create version-bump PRs |
+| `SENTRY_INTERNAL_APP_PRIVATE_KEY` | Secret | GitHub App private key |
+
+The app needs permission to push branches and open pull requests on this repo.
+
+#### Upgrade flow
+
+1. The workflow opens a PR updating `helm_chart_version` and/or `firewall_image_tag` in `terraform/variables.tf`.
+2. If you override versions in `terraform.tfvars`, update those values to match before merging (CI passes them via `--var-file`).
+3. Review the `terraform plan` check on the PR — expect a Helm release change and pod rollout.
+4. Confirm the new image is allowed by **Binary Authorization** (project singleton policy). If admission blocks the rollout, add the digest to the allow policy before merging.
+5. Merge to `main` → `tf-apply` rolls out the new version.
+
+To bump versions by hand (without waiting for the workflow), edit `helm_chart_version` / `firewall_image_tag` in `terraform/variables.tf` (and `terraform.tfvars` if used) and open a PR as usual.
 
 ### Deploy
+
+0. Authenticate as the terraformer service account locally, there's 2 recommanded options
+
+   1. Use `sac-terraform-auth`: run `eval "$(sac-terraform-auth socket-firewall-tf-apply@sac-prod-sa.iam.gserviceaccount.com)"` to export gcloud token to your terminal env var
+   2. Use [sudo-gcp](https://github.com/getsentry/sudo-gcp): wrap all following command with `sudo-gcp`, e.g. `sudo-gcp terraform init`, `sudo-gcp terraform apply`
 
 1. Initialise Terraform and create the KMS key ring and Secret Manager secret container:
 
@@ -321,10 +287,11 @@ Both runners are GitHub-hosted and reach the private control plane through Conne
 3. Apply the rest of the stack (Connect Gateway handles control-plane access, so this works locally or in CI):
 
    ```bash
+   terraform plan
    terraform apply
    ```
 
-4. If `firewall_domain` is set and `enable_gcp_managed_tls = true` (default), configure DNS:
+4. If `firewall_domain` is set, configure DNS:
 
    ```bash
    # Publish the CNAME for certificate validation
@@ -340,6 +307,50 @@ Both runners are GitHub-hosted and reach the private control plane through Conne
    gcloud container fleet memberships get-credentials socket-firewall --project <project_id>
    ```
 
-> **Note:** `terraform.tfvars` is gitignored and must not be committed — it may contain environment-specific values.
-
 > **CMEK migration warning:** If an existing Secret Manager secret used auto-replication, switching to CMEK user-managed replication forces secret replacement and deletes existing versions. Re-add the token value after apply.
+
+## Operations & troubleshooting
+
+### Accessing the cluster (`kubectl` / logs)
+
+The control plane has no public endpoint, so always get credentials through Connect Gateway:
+
+```bash
+gcloud container fleet memberships get-credentials socket-firewall --project <project_id>
+```
+
+Connect Gateway proxies the Kubernetes API, but **streaming** operations (`kubectl logs`, `exec`, `port-forward`, `run -it`) frequently fail with `No agent available`. Plain API reads (`get`, `describe`) work fine. To read container logs, query **Cloud Logging** instead (nodes have `logging.write`, so stdout/stderr is captured regardless):
+
+```bash
+gcloud logging read \
+  'resource.type="k8s_container"
+   resource.labels.cluster_name="socket-firewall"
+   resource.labels.namespace_name="socket-firewall"
+   resource.labels.container_name="socket-firewall"
+   severity>=DEFAULT' \
+  --project <project_id> --limit 100 --freshness=2h \
+  --format='value(timestamp, severity, textPayload)'
+```
+
+### Common issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `cannot create REST client: no client config` (plan) | `kubernetes_manifest` does a live API call at plan time before the cluster exists | Gateway manifests use `kubectl_manifest` (alekc/kubectl) with `lazy_load = true` instead |
+| `invalid configuration: no configuration has been provided` (kubectl provider) | alekc/kubectl ≥ 2.3 validates eagerly when the cluster endpoint is still unknown | `lazy_load = true` (requires provider ≥ 2.4) |
+| `dial tcp 172.16.0.x:443: i/o timeout` | Running against the private endpoint directly from outside the VPC | Use Connect Gateway (the configured provider host), not the direct endpoint |
+| Certificate stuck `PROVISIONING`, `CNAME_MISMATCH` | The `_acme-challenge.<domain>` validation CNAME isn't published / not propagated | Publish `terraform output tls_dns_authorization_record`; Certificate Manager retries on backoff (often 15–60 min) |
+| TLS handshake reset on the hostname | Managed cert not yet `ACTIVE` | Wait for `ACTIVE`, then allow a few minutes for the LB frontend to pick it up |
+| `helm` release times out (`context deadline exceeded`) but pods are fine | `wait = true` timeout too short during a slow first rollout | Increase `timeout`; a *failed* release gets tainted and reinstalled each apply, so reconcile it (`helm uninstall` / `helm rollback`) before retrying |
+| Pods `CrashLoopBackOff`, logs show `cannot load certificate key ... Permission denied` | Cert-generator init runs as UID 1000 but the image runs as UID 1001, so nginx can't read the `0600` key | `podSecurityContext.fsGroup` + cert-generator `runAsUser` aligned to the image UID (set in `helm.tf`) |
+| `503 no healthy upstream` while pods are `Ready` | LB health check probes `/` (its default), which the firewall doesn't answer `200` | `HealthCheckPolicy` pointing the LB health check at `/health` (in `tls.tf`) |
+| Gateway "load balancer" not visible | The data-plane LB is a Gateway-managed **global external ALB** (`gkegw1-…`), not a `LoadBalancer` Service | `kubectl get gateway -A` for the address; `gcloud compute forwarding-rules list --global` |
+
+### Verifying the data plane
+
+```bash
+kubectl get gateway socket-firewall-gateway -n socket-firewall -o wide        # ADDRESS = LB IP
+gcloud compute backend-services get-health <gkegw1-…-socket-firewall-80-…> \
+  --global --project <project_id>                                             # expect HEALTHY
+curl -sv https://<firewall_domain>/health                                     # expect 200
+```
