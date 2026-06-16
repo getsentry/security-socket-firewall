@@ -94,7 +94,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.commit_token.outputs.token }}
           branch: chore/bump-firewall-versions-${{ github.sha }}
           title: "chore: bump socket-firewall chart and image versions"
-          commit-message: "chore: bump socket-firewall chart and image versions"
+          commit_message: "chore: bump socket-firewall chart and image versions"
           body: |
             Automated weekly version check found newer releases.
 
