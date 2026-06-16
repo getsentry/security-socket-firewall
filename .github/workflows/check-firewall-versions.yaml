@@ -29,7 +29,15 @@ jobs:
           TF=terraform/variables.tf
 
           read_default() {
-            sed -n "/variable \"$1\"/,/}/p" "$TF" | grep 'default' | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+            local val
+            val=$(sed -n "/variable \"$1\"/,/}/p" "$TF" \
+              | grep -E '^\s+default\s*=' | head -1 \
+              | sed -E 's/.*"([^"]+)".*/\1/' || true)
+            if [ -z "$val" ]; then
+              echo "::error::variable \"$1\" not found or has no default in $TF" >&2
+              exit 1
+            fi
+            echo "$val"
           }
 
           set_default() {
