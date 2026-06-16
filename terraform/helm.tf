@@ -10,6 +10,34 @@ locals {
       enabled = var.enable_autoscaling
     }
 
+    # The socket-registry-firewall:1.1.159 image runs as UID 1001, but the
+    # chart's cert-generator init container defaults to runAsUser 1000 and writes
+    # /etc/nginx/ssl/privkey.pem mode 0600 (owner-only). The UID mismatch makes
+    # nginx (1001) unable to read the key -> "Permission denied" -> CrashLoop.
+    # Align the cert generator to the image's runtime UID so the main container
+    # owns and can read the generated key. fsGroup is set as a belt-and-suspenders
+    # so the shared EmptyDir volumes are group-accessible too.
+    podSecurityContext = {
+      fsGroup = 1001
+    }
+
+    initContainers = {
+      certGenerator = {
+        securityContext = {
+          allowPrivilegeEscalation = false
+          readOnlyRootFilesystem   = true
+          runAsNonRoot             = true
+          runAsUser                = 1001
+          capabilities = {
+            drop = ["ALL"]
+          }
+          seccompProfile = {
+            type = "RuntimeDefault"
+          }
+        }
+      }
+    }
+
     socket = {
       existingSecret    = kubernetes_secret.socket_api_token.metadata[0].name
       existingSecretKey = "SOCKET_SECURITY_API_TOKEN"
@@ -121,12 +149,7 @@ resource "helm_release" "socket_firewall" {
   repository = "https://socketdev-demo.github.io/socket-firewall-helm"
   chart      = "socket-firewall"
   version    = var.helm_chart_version
-  # TEMPORARY: wait disabled to break the taint->replace loop during the
-  # LoadBalancer->ClusterIP migration. A failed `wait` was tainting the release,
-  # causing every apply to uninstall (thrashing the old external LB) and
-  # reinstall. With wait=false the install returns immediately so the workload
-  # can settle and be observed. Revert to wait=true once the rollout is healthy.
-  wait       = false
+  wait       = true
   timeout    = 600
 
   values = [yamlencode(local.helm_values)]
@@ -146,22 +169,7 @@ data "kubernetes_service" "socket_firewall" {
   depends_on = [helm_release.socket_firewall]
 }
 
-# Keep at least one firewall replica available during voluntary
-# disruptions (node drains, upgrades).
-resource "kubernetes_pod_disruption_budget_v1" "socket_firewall" {
-  metadata {
-    name      = "socket-firewall-tf"
-    namespace = kubernetes_namespace.socket_firewall.metadata[0].name
-  }
-
-  spec {
-    min_available = 1
-    selector {
-      match_labels = {
-        "app.kubernetes.io/instance" = helm_release.socket_firewall.name
-      }
-    }
-  }
-
-  depends_on = [helm_release.socket_firewall]
-}
+# Note: the socket-firewall Helm chart already creates its own
+# PodDisruptionBudget (min available 1) for these pods, so no Terraform-managed
+# PDB is needed. A second PDB on the same selector triggers
+# "MultiplePodDisruptionBudgets" warnings and can interfere with rollouts.

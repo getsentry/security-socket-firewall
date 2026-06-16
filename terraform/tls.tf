@@ -222,3 +222,40 @@ resource "kubectl_manifest" "socket_firewall_http_route" {
 
   depends_on = [kubectl_manifest.socket_firewall_gateway]
 }
+
+# Without this, the GKE Gateway health-checks the backend on "/" (its default),
+# which the firewall does not answer with 200 on the HTTP port — so every
+# endpoint is marked UNHEALTHY and the load balancer returns "no healthy
+# upstream" even though the pods are Ready. Point the LB health check at
+# /health (which the firewall serves 200 on the HTTP serving port, same as the
+# pod readiness probe).
+resource "kubectl_manifest" "socket_firewall_health_check" {
+  count = local.use_gcp_managed_tls ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "networking.gke.io/v1"
+    kind       = "HealthCheckPolicy"
+    metadata = {
+      name      = "${var.cluster_name}-healthcheck"
+      namespace = var.firewall_namespace
+    }
+    spec = {
+      default = {
+        config = {
+          type = "HTTP"
+          httpHealthCheck = {
+            portSpecification = "USE_SERVING_PORT"
+            requestPath       = "/health"
+          }
+        }
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = helm_release.socket_firewall.name
+      }
+    }
+  })
+
+  depends_on = [helm_release.socket_firewall]
+}

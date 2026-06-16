@@ -89,7 +89,7 @@ resource "google_container_cluster" "main" {
   }
 
   lifecycle {
-    ignore_changes = [min_master_version]
+    ignore_changes = [min_master_version, database_encryption]
   }
 
   depends_on = [google_kms_crypto_key_iam_member.gke_etcd]
