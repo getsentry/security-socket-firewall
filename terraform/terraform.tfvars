@@ -13,5 +13,5 @@ node_max_count    = 3
 firewall_domain = "sfw.security.sentry.io."
 
 replica_count      = 2
-helm_chart_version = "0.3.0"
-firewall_image_tag = "1.1.327"
+helm_chart_version = "0.3.1"
+firewall_image_tag = "1.1.328"
