@@ -32,3 +32,5 @@ jobs:
         with:
           add_github_comment: changes-only
           path: terraform
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
