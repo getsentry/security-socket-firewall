@@ -94,7 +94,7 @@ jobs:
       - name: Open PR if changes
         if: steps.check.outputs.updated == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.commit_token.outputs.token }}
           branch: chore/bump-firewall-versions-${{ github.sha }}
           title: "chore: bump socket-firewall chart and image versions"
           commit_message: "chore: bump socket-firewall chart and image versions"
