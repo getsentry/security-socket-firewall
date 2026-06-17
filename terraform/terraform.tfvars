@@ -7,7 +7,6 @@ terraformer_plan = "socket-firewall-tf-plan@sac-prod-sa.iam.gserviceaccount.com"
 
 cluster_name      = "socket-firewall"
 node_machine_type = "e2-standard-2"
-node_count        = 2
 node_min_count    = 2
 node_max_count    = 3
 

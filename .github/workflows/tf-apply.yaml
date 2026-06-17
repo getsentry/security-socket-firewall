@@ -5,6 +5,12 @@ on:
     branches:
         - main
 
+# Serialize applies so two quick merges to main don't run overlapping
+# terraform apply runs against the same GCS state lock.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
 jobs:
   build:
     name: tf apply

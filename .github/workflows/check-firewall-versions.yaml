@@ -1,4 +1,4 @@
-name: Check Firewall Versions
+name: Check Socket Versions
 
 on:
   schedule:
@@ -10,6 +10,9 @@ jobs:
   bump-versions:
     name: bump chart and image versions
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Get github commit token
@@ -91,7 +94,7 @@ jobs:
       - name: Open PR if changes
         if: steps.check.outputs.updated == 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.commit_token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           branch: chore/bump-firewall-versions-${{ github.sha }}
           title: "chore: bump socket-firewall chart and image versions"
           commit_message: "chore: bump socket-firewall chart and image versions"
@@ -117,5 +120,7 @@ jobs:
           git push -u origin "${branch}"
 
           gh pr create -B main \
+            --repo "${{ github.repository }}" \
+            --head "${branch}" \
             --title "${title}" \
             --body "${body}"

@@ -3,21 +3,9 @@ output "cluster_name" {
   value       = google_container_cluster.main.name
 }
 
-output "cluster_endpoint" {
-  description = "GKE cluster API endpoint"
-  value       = google_container_cluster.main.endpoint
-  sensitive   = true
-}
-
-output "cluster_ca_certificate" {
-  description = "GKE cluster CA certificate (base64)"
-  value       = google_container_cluster.main.master_auth[0].cluster_ca_certificate
-  sensitive   = true
-}
-
 output "kubeconfig_command" {
-  description = "Command to configure kubectl"
-  value       = "gcloud container clusters get-credentials ${google_container_cluster.main.name} --zone ${var.zone} --project ${var.project_id}"
+  description = "Command to configure kubectl via fleet Connect Gateway (the control plane has no public endpoint)"
+  value       = "gcloud container fleet memberships get-credentials ${var.cluster_name} --project ${var.project_id}"
 }
 
 output "firewall_service_name" {

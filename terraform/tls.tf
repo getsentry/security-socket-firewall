@@ -10,10 +10,6 @@
 # firewall_domain at the gateway IP from firewall_load_balancer_ip.
 # ---------------------------------------------------------------------------
 
-locals {
-  use_gcp_managed_tls = local.firewall_domain != ""
-}
-
 resource "google_certificate_manager_dns_authorization" "firewall" {
   count = local.use_gcp_managed_tls ? 1 : 0
 
@@ -123,7 +119,7 @@ resource "google_compute_ssl_policy" "firewall" {
 
   name            = "${var.cluster_name}-ssl-policy"
   project         = var.project_id
-  profile         = "MODERN"
+  profile         = "RESTRICTED"
   min_tls_version = "TLS_1_2"
 }
 

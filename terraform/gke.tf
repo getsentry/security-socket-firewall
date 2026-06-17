@@ -3,6 +3,12 @@ resource "google_container_cluster" "main" {
   location            = var.zone
   deletion_protection = true
 
+  resource_labels = {
+    app  = "socket-firewall"
+    env  = "prod"
+    team = "team-security-2"
+  }
+
   # Remove the default node pool immediately and manage it separately
   remove_default_node_pool = true
   initial_node_count       = 1
@@ -23,20 +29,11 @@ resource "google_container_cluster" "main" {
     master_ipv4_cidr_block  = "172.16.0.0/28"
   }
 
-  # The control plane is fully private (enable_private_endpoint = true), so
-  # authorized networks must be internal/RFC1918 ranges — a public range like
-  # the IAP forwarding block (35.235.240.0/20) is rejected here. IAP tunnels to
-  # a VM, not to the control plane, so the only path in is:
-  #   you -> IAP tunnel -> bastion/proxy VM in this subnet -> control plane.
-  # The connection therefore originates from the bastion's internal IP, so we
-  # authorize the internal subnet range.
-  master_authorized_networks_config {
-    cidr_blocks {
-      cidr_block   = var.subnet_cidr
-      display_name = "internal-subnet-bastion"
-    }
-  }
-
+  # No master_authorized_networks_config: the control plane is private
+  # (enable_private_endpoint = true) and reached only via fleet Connect Gateway
+  # (see main.tf / fleet.tf), whose traffic does not originate from a subnet IP.
+  # There is no bastion in this stack, so authorizing the subnet would be dead
+  # config that widens the allowed source set for no benefit.
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
@@ -82,8 +79,8 @@ resource "google_container_cluster" "main" {
 
   maintenance_policy {
     recurring_window {
-      start_time = "2024-01-01T03:00:00Z"
-      end_time   = "2024-01-01T07:00:00Z"
+      start_time = "2026-01-01T03:00:00Z"
+      end_time   = "2026-01-01T07:00:00Z"
       recurrence = "FREQ=WEEKLY;BYDAY=SA,SU"
     }
   }
@@ -96,11 +93,12 @@ resource "google_container_cluster" "main" {
 }
 
 resource "google_container_node_pool" "main" {
-  name       = "${var.cluster_name}-nodes"
-  cluster    = google_container_cluster.main.id
-  location   = var.zone
-  node_count = var.node_count
+  name     = "${var.cluster_name}-nodes"
+  cluster  = google_container_cluster.main.id
+  location = var.zone
 
+  # node_count is intentionally unset — the autoscaling block owns the node
+  # count. Setting it would make Terraform fight the autoscaler on apply.
   autoscaling {
     min_node_count = var.node_min_count
     max_node_count = var.node_max_count
