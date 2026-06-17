@@ -8,7 +8,7 @@ Infrastructure code lives in [`terraform/`](terraform/).
 
 The deployment runs Socket Firewall on a **private GKE cluster** with a **GKE Gateway**, **Google-managed TLS** via Certificate Manager, **Cloud NAT** for outbound traffic, **CMEK encryption**, **Binary Authorization**, **Calico NetworkPolicies**, and **Secret Manager** for the Socket.dev API token.
 
-The control plane has **no public endpoint** (private endpoint, `172.16.0.0/28`); the only inbound networks authorized to reach it are internal (the cluster subnet, `10.10.0.0/24`). Terraform and `kubectl` reach it through **fleet Connect Gateway** — the cluster's GKE-managed Connect agent opens an *outbound* channel to Google, and `connectgateway.googleapis.com` proxies IAM-authenticated traffic back down it. This works identically from a local machine and from a **GitHub-hosted CI runner** with no bastion, IAP tunnel, or VPC peering. CI runs via Workload Identity Federation with two service accounts: a read-only **plan** SA (PR) and a write **apply** SA (push to `main`).
+The control plane has **no public endpoint and no inbound network path** (private endpoint, `172.16.0.0/28`). Terraform and `kubectl` reach it through **fleet Connect Gateway** — the cluster's GKE-managed Connect agent opens an *outbound* channel to Google, and `connectgateway.googleapis.com` proxies IAM-authenticated traffic back down it. This works identically from a local machine and from a **GitHub-hosted CI runner** with no bastion, IAP tunnel, or VPC peering. CI runs via Workload Identity Federation with two service accounts: a read-only **plan** SA (PR) and a write **apply** SA (push to `main`).
 
 ```mermaid
 flowchart TB
@@ -115,13 +115,13 @@ sequenceDiagram
 | Control | Implementation |
 |---------|----------------|
 | **Encryption at rest** | CMEK for GKE etcd, node disks, and Secret Manager (90-day key rotation) |
-| **Encryption in transit** | GCP-managed TLS at the Gateway; SSL policy enforces MODERN cipher suites and TLS 1.2+ |
+| **Encryption in transit** | GCP-managed TLS at the Gateway; SSL policy enforces RESTRICTED cipher suites and TLS 1.2+ |
 | **Network egress** | VPC firewall deny-all with explicit TCP 443 allow; Kubernetes egress governed by VPC rules |
 | **Network ingress** | Calico NetworkPolicies default-deny ingress in the firewall namespace |
 | **Image admission** | Binary Authorization (`PROJECT_SINGLETON_POLICY_ENFORCE`) |
 | **Node hardening** | Shielded VMs, dedicated node SA (no `cloud-platform` scope), Workload Identity, legacy metadata endpoints disabled |
 | **Control plane** | Private endpoint only — no public API server; reachable solely via Connect Gateway (IAM-authenticated) |
-| **Availability** | HPA, pod anti-affinity, PodDisruptionBudget (`minAvailable: 1`), 2-node minimum |
+| **Availability** | HPA, pod anti-affinity, PodDisruptionBudget (`minAvailable: 1`), 2-node minimum. **Zonal cluster** (`us-central1-a`) — these protect against single-node loss, not a full-zone outage, and the control plane has no HA SLA |
 | **IAM least privilege** | Custom Terraform roles replace `container.admin`/`secretmanager.secretAdmin`/`cloudkms.admin` (no project-wide secret payload access); read-only plan SA distinct from write apply SA; fleet write access is bootstrap-only |
 | **Audit** | VPC flow logs and firewall rule logging with full metadata |
 
@@ -144,7 +144,7 @@ When `firewall_domain` is set, Terraform always provisions GCP-managed TLS:
 1. A **Certificate Manager DNS authorization** — publish the CNAME from `terraform output tls_dns_authorization_record`
 2. A **Google-managed certificate** — becomes `ACTIVE` after DNS validation (typically 15–60 minutes)
 3. An **external GKE Gateway** (`gke-l7-global-external-managed`) with a **certificate map** — terminates public HTTPS at the load balancer. When using the certmap annotation the listener has **no `tls` block** (TLS is configured entirely by the annotation; adding a `tls` section is rejected)
-4. A **global SSL policy** (`MODERN`, TLS 1.2 minimum) attached via **GCPGatewayPolicy**
+4. A **global SSL policy** (`RESTRICTED`, TLS 1.2 minimum) attached via **GCPGatewayPolicy**
 5. An **HTTPRoute** — forwards traffic to the firewall pods (backend `port 80`, plain HTTP)
 6. A **HealthCheckPolicy** — points the load-balancer health check at `/health`. Without it the LB defaults to probing `/`, which the firewall does not answer with `200`, so every backend is marked unhealthy (`no healthy upstream`)
 
@@ -300,6 +300,8 @@ To bump versions by hand (without waiting for the workflow), edit `helm_chart_ve
    # After the certificate is ACTIVE (15–60 min), point the domain at the gateway IP
    terraform output firewall_load_balancer_ip
    ```
+
+   > `firewall_load_balancer_ip` is read from the live Gateway status and may be empty until the GKE Gateway controller assigns the external address (a few minutes after the first apply). If it's blank, re-run after a `terraform refresh`, or read it directly with `kubectl get gateway socket-firewall-gateway -n socket-firewall -o wide`.
 
 5. Configure `kubectl`. The control plane has no public endpoint, so fetch credentials through Connect Gateway rather than the direct endpoint:
 
