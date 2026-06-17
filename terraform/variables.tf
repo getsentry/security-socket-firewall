@@ -118,13 +118,11 @@ variable "firewall_domain" {
 variable "helm_chart_version" {
   description = "Version of the socket-firewall Helm chart"
   type        = string
-  default     = "0.2.4"
 }
 
 variable "firewall_image_tag" {
   description = "Container image tag for socketdev/socket-registry-firewall (pinned for reproducible rollouts; bumped by check-firewall-versions workflow)"
   type        = string
-  default     = "1.1.159"
 }
 
 variable "replica_count" {

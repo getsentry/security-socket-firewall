@@ -29,30 +29,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TF=terraform/variables.tf
+          TF=terraform/terraform.tfvars
 
-          read_default() {
+          read_tfvar() {
             local val
-            val=$(sed -n "/variable \"$1\"/,/}/p" "$TF" \
-              | grep -E '^\s+default\s*=' | head -1 \
-              | sed -E 's/.*"([^"]+)".*/\1/' || true)
+            val=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$TF" \
+              | head -1 \
+              | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
             if [ -z "$val" ]; then
-              echo "::error::variable \"$1\" not found or has no default in $TF" >&2
+              echo "::error::$1 not found in $TF" >&2
               exit 1
             fi
             echo "$val"
           }
 
-          set_default() {
-            sed -i "/variable \"$1\"/,/}/ s/default *= *\"[^\"]*\"/default     = \"$2\"/" "$TF"
+          set_tfvar() {
+            sed -i -E "s/^([[:space:]]*$1[[:space:]]*=[[:space:]]*)\"[^\"]*\"/\1\"$2\"/" "$TF"
           }
 
           newer_than() {
             [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ] && [ "$1" != "$2" ]
           }
 
-          current_chart=$(read_default helm_chart_version)
-          current_image=$(read_default firewall_image_tag)
+          current_chart=$(read_tfvar helm_chart_version)
+          current_image=$(read_tfvar firewall_image_tag)
 
           latest_chart=$(curl -fsSL https://socketdev-demo.github.io/socket-firewall-helm/index.yaml \
             | grep -E '^\s+version:' | awk '{print $2}' | sort -V | tail -1)
@@ -71,11 +71,11 @@ jobs:
 
           summary=""
           if newer_than "$current_chart" "$latest_chart"; then
-            set_default helm_chart_version "$latest_chart"
+            set_tfvar helm_chart_version "$latest_chart"
             summary+="- \`helm_chart_version\`: \`$current_chart\` → \`$latest_chart\`"$'\n'
           fi
           if newer_than "$current_image" "$latest_image"; then
-            set_default firewall_image_tag "$latest_image"
+            set_tfvar firewall_image_tag "$latest_image"
             summary+="- \`firewall_image_tag\`: \`$current_image\` → \`$latest_image\`"$'\n'
           fi
 
@@ -106,7 +106,6 @@ jobs:
 
             ## Follow-up
             - Review the `terraform plan` check on this PR.
-            - If you override versions in `terraform/terraform.tfvars`, update those values to match before merging.
             - Confirm the new image is allowed by Binary Authorization before merging to `main`.
 
             Triggered by [check-firewall-versions](.github/workflows/check-firewall-versions.yaml).
