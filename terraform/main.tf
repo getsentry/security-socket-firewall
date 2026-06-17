@@ -40,6 +40,10 @@ provider "google-beta" {
   region  = var.region
 }
 
+data "google_project" "main" {
+  project_id = var.project_id
+}
+
 # The control plane is private (enable_private_endpoint = true). Rather than
 # dialing the private endpoint directly (which requires VPC/IAP network access),
 # the Kubernetes-facing providers reach it through fleet Connect Gateway — a

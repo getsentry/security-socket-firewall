@@ -20,10 +20,6 @@
 # WIF-triggered identity is left holding fleet write access.
 # ---------------------------------------------------------------------------
 
-data "google_project" "main" {
-  project_id = var.project_id
-}
-
 resource "google_gke_hub_membership" "main" {
   provider      = google-beta
   membership_id = var.cluster_name
