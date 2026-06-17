@@ -4,11 +4,11 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     google-beta = {
       source  = "hashicorp/google-beta"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
@@ -53,6 +53,12 @@ provider "google-beta" {
 # cluster_ca_certificate is supplied — only host + a short-lived access token.
 locals {
   connect_gateway_host = "https://connectgateway.googleapis.com/v1/projects/${data.google_project.main.number}/locations/global/gkeMemberships/${google_gke_hub_membership.main.membership_id}"
+
+  # Normalized firewall domain (trailing dot stripped) and the flag that gates
+  # every GCP-managed TLS / Gateway resource. Defined here because both helm.tf
+  # and tls.tf depend on them.
+  firewall_domain     = trim(var.firewall_domain, ".")
+  use_gcp_managed_tls = local.firewall_domain != ""
 }
 
 provider "kubernetes" {

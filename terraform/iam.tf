@@ -213,6 +213,17 @@ resource "google_secret_manager_secret_iam_member" "tf_sa_secret_accessor" {
   project   = var.project_id
 }
 
+# The plan SA must also read the token: the google_secret_manager_secret_version
+# data source (secrets.tf) is evaluated during `terraform plan`, which calls
+# AccessSecretVersion. Resource-scoped like the apply SA above, so the plan SA
+# still cannot read any other secret in the project.
+resource "google_secret_manager_secret_iam_member" "tf_plan_sa_secret_accessor" {
+  secret_id = google_secret_manager_secret.socket_api_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.tf_plan_sa_member
+  project   = var.project_id
+}
+
 # Allow TF SA to create and manage secret resources (does NOT include reading secret values —
 # that is covered by the resource-scoped secretAccessor binding above)
 resource "google_project_iam_member" "tf_sa_secret_admin" {
@@ -314,6 +325,12 @@ resource "google_project_iam_custom_role" "tf_plan_reader" {
     "compute.addresses.list",
     "compute.globalAddresses.get",
     "compute.globalAddresses.list",
+    # SSL policy attached to the Gateway frontend (tls.tf)
+    "compute.sslPolicies.get",
+    "compute.sslPolicies.list",
+    # Backing managed instance group of the GKE node pool (read on node-pool refresh)
+    "compute.instanceGroupManagers.get",
+    "compute.instanceGroupManagers.list",
     # IAM — service accounts and custom roles
     "iam.serviceAccounts.get",
     "iam.serviceAccounts.list",
@@ -323,7 +340,8 @@ resource "google_project_iam_custom_role" "tf_plan_reader" {
     # Project IAM (needed to refresh google_project_iam_member drift)
     "resourcemanager.projects.get",
     "resourcemanager.projects.getIamPolicy",
-    # Secret Manager (metadata only — no payload access)
+    # Secret Manager (metadata only — token payload is granted resource-scoped
+    # via google_secret_manager_secret_iam_member.tf_plan_sa_secret_accessor)
     "secretmanager.secrets.get",
     "secretmanager.secrets.list",
     "secretmanager.secrets.getIamPolicy",

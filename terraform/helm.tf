@@ -1,6 +1,4 @@
 locals {
-  firewall_domain = trim(var.firewall_domain, ".")
-
   helm_values = {
     replicaCount = var.replica_count
 

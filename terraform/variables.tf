@@ -77,12 +77,6 @@ variable "node_machine_type" {
   default     = "e2-standard-2"
 }
 
-variable "node_count" {
-  description = "Number of nodes per zone"
-  type        = number
-  default     = 2
-}
-
 variable "node_min_count" {
   description = "Minimum number of nodes (autoscaling)"
   type        = number

@@ -10,10 +10,6 @@
 # encrypt/decrypt on the project's behalf. Keys auto-rotate every 90 days.
 # ---------------------------------------------------------------------------
 
-data "google_project" "this" {
-  project_id = var.project_id
-}
-
 # Secret Manager service agent must exist before we can grant it KMS access.
 resource "google_project_service_identity" "secretmanager" {
   provider = google-beta
@@ -24,8 +20,8 @@ resource "google_project_service_identity" "secretmanager" {
 }
 
 locals {
-  gke_service_agent     = "serviceAccount:service-${data.google_project.this.number}@container-engine-robot.iam.gserviceaccount.com"
-  compute_service_agent = "serviceAccount:service-${data.google_project.this.number}@compute-system.iam.gserviceaccount.com"
+  gke_service_agent     = "serviceAccount:service-${data.google_project.main.number}@container-engine-robot.iam.gserviceaccount.com"
+  compute_service_agent = "serviceAccount:service-${data.google_project.main.number}@compute-system.iam.gserviceaccount.com"
 }
 
 resource "google_kms_key_ring" "main" {

@@ -43,9 +43,22 @@ resource "kubernetes_network_policy" "allow_firewall_ingress" {
     }
     policy_types = ["Ingress"]
 
-    # Empty rule = allow ingress to the firewall pods from any source
-    # (internal gateway/LB proxy range and GKE health checkers).
-    ingress {}
+    # Allow ingress only from the GKE external L7 load-balancer proxy and
+    # health-check ranges. Public clients reach the service through the external
+    # ALB (tls.tf), which connects to the pods from these Google-owned ranges, so
+    # the service stays public while the pods reject every other source.
+    ingress {
+      from {
+        ip_block {
+          cidr = "130.211.0.0/22"
+        }
+      }
+      from {
+        ip_block {
+          cidr = "35.191.0.0/16"
+        }
+      }
+    }
   }
 
   depends_on = [helm_release.socket_firewall]
