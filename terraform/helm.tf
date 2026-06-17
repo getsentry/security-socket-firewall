@@ -15,7 +15,7 @@ locals {
       enabled = true
     }
 
-    # The socket-registry-firewall:1.1.159 image runs as UID 1001, but the
+    # The socket-registry-firewall image runs as UID 1001, but the
     # chart's cert-generator init container defaults to runAsUser 1000 and writes
     # /etc/nginx/ssl/privkey.pem mode 0600 (owner-only). The UID mismatch makes
     # nginx (1001) unable to read the key -> "Permission denied" -> CrashLoop.

@@ -165,7 +165,8 @@ The Gateway terminates the public, browser-trusted certificate and forwards to t
 | [`secrets.tf`](terraform/secrets.tf) | CMEK-encrypted Secret Manager secret for the Socket API token |
 | [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release (incl. pod `securityContext`/`fsGroup` so nginx can read the generated cert key) |
 | [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute, HealthCheckPolicy |
-| [`variables.tf`](terraform/variables.tf) | Input variables |
+| [`variables.tf`](terraform/variables.tf) | Input variable declarations (chart/image versions are required, no default) |
+| [`terraform.tfvars`](terraform/terraform.tfvars) | Concrete pinned values Terraform auto-loads (project, SA emails, node counts, `firewall_domain`, chart/image versions) |
 | [`outputs.tf`](terraform/outputs.tf) | Cluster credentials, gateway IP, DNS auth record, health URL |
 
 ## Getting started
@@ -224,21 +225,21 @@ Terraform plan/apply runners are GitHub-hosted and reach the private control pla
 
 ### Chart and image version updates
 
-The firewall image tag (`firewall_image_tag`) and Helm chart version (`helm_chart_version`) are **pinned in Terraform** — the chart’s default `latest` tag is not used. See [`helm.tf`](terraform/helm.tf).
+The firewall image tag (`firewall_image_tag`) and Helm chart version (`helm_chart_version`) are **pinned in [`terraform.tfvars`](terraform/terraform.tfvars)** — the chart’s default `latest` tag is not used. (`variables.tf` declares both as required inputs, with no default.)
 
-| Variable | Default (in `variables.tf`) | Upstream source |
+| Variable | Pinned (in `terraform.tfvars`) | Upstream source |
 |----------|----------------------------|-----------------|
-| `helm_chart_version` | `0.2.4` | [socket-firewall Helm index](https://socketdev-demo.github.io/socket-firewall-helm/index.yaml) |
-| `firewall_image_tag` | `1.1.159` | [`socketdev/socket-registry-firewall`](https://hub.docker.com/r/socketdev/socket-registry-firewall) on Docker Hub |
+| `helm_chart_version` | `0.3.0` | [socket-firewall Helm index](https://socketdev-demo.github.io/socket-firewall-helm/index.yaml) |
+| `firewall_image_tag` | `1.1.327` | [`socketdev/socket-registry-firewall`](https://hub.docker.com/r/socketdev/socket-registry-firewall) on Docker Hub |
 
 #### Automated checks
 
 [`check-firewall-versions.yaml`](.github/workflows/check-firewall-versions.yaml) runs on a schedule and can be triggered manually:
 
 - **Schedule:** Mondays at 09:00 UTC
-- **Manual run:** **Actions → Check Firewall Versions → Run workflow**
+- **Manual run:** **Actions → Check Socket Versions → Run workflow**
 
-The workflow fetches the latest Helm chart version and the highest `x.y.z` Docker tag, compares them to the defaults in `terraform/variables.tf`, and opens a PR when either is newer. PRs are created by `getsantry[bot]` using a GitHub App token.
+The workflow fetches the latest Helm chart version and the highest `x.y.z` Docker tag, compares them to the pinned values in `terraform/terraform.tfvars`, and opens a PR when either is newer. PRs are created by `getsantry[bot]` using a GitHub App token.
 
 **Repository configuration** (for the version-check workflow):
 
@@ -251,13 +252,12 @@ The app needs permission to push branches and open pull requests on this repo.
 
 #### Upgrade flow
 
-1. The workflow opens a PR updating `helm_chart_version` and/or `firewall_image_tag` in `terraform/variables.tf`.
-2. If you override versions in `terraform.tfvars`, update those values to match before merging — Terraform auto-loads `terraform.tfvars`, so it overrides the `variables.tf` defaults the workflow bumps.
-3. Review the `terraform plan` check on the PR — expect a Helm release change and pod rollout.
-4. Confirm the new image is allowed by **Binary Authorization** (project singleton policy). If admission blocks the rollout, add the digest to the allow policy before merging.
-5. Merge to `main` → `tf-apply` rolls out the new version.
+1. The workflow opens a PR updating `helm_chart_version` and/or `firewall_image_tag` in `terraform/terraform.tfvars`.
+2. Review the `terraform plan` check on the PR — expect a Helm release change and pod rollout.
+3. Confirm the new image is allowed by **Binary Authorization** (project singleton policy). If admission blocks the rollout, add the digest to the allow policy before merging.
+4. Merge to `main` → `tf-apply` rolls out the new version.
 
-To bump versions by hand (without waiting for the workflow), edit `helm_chart_version` / `firewall_image_tag` in `terraform/variables.tf` (and `terraform.tfvars` if used) and open a PR as usual.
+To bump versions by hand (without waiting for the workflow), edit `helm_chart_version` / `firewall_image_tag` in `terraform/terraform.tfvars` and open a PR as usual.
 
 ### Deploy
 
