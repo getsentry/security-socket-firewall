@@ -199,7 +199,7 @@ Roles Terraform grants to the **apply SA**:
 | `roles/iam.serviceAccountUser` | Attach the node SA to node-pool VMs |
 | `roles/gkehub.gatewayEditor` + `roles/gkehub.viewer` | Reach the control plane via Connect Gateway; refresh the fleet membership |
 
-The **plan SA** receives read-only equivalents: custom `socketFirewallTfPlanReader`, `roles/container.viewer`, `roles/certificatemanager.viewer`, and `roles/gkehub.gatewayReader`.
+The **plan SA** receives read-only equivalents: custom `socketFirewallTfPlanReader`, `roles/container.viewer`, `roles/certificatemanager.viewer`, and `roles/gkehub.gatewayReader`. Because `container.viewer` maps to the `view` ClusterRole (which excludes secrets), a namespace-scoped Kubernetes `Role`/`RoleBinding` in [`kubernetes_rbac.tf`](terraform/kubernetes_rbac.tf) also grants `secrets` get/list/watch in `socket-firewall` for `terraform plan`.
 
 Because Terraform creates these custom roles and bindings on the first apply, the bootstrap identity (a project admin) must first grant the apply SA enough elevated access to perform that initial run, then tighten it:
 

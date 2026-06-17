@@ -363,7 +363,8 @@ resource "google_project_iam_member" "tf_plan_sa_reader" {
 }
 
 # Kubernetes API read access for the helm/kubernetes/kubectl providers during plan.
-# roles/container.viewer maps to the "view" RBAC ClusterRole in GKE.
+# roles/container.viewer maps to the "view" RBAC ClusterRole in GKE, which omits
+# secrets — see kubernetes_rbac.tf for the namespace-scoped secret read binding.
 resource "google_project_iam_member" "tf_plan_sa_k8s_viewer" {
   project = var.project_id
   role    = "roles/container.viewer"
