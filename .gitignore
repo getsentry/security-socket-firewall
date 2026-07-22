@@ -39,3 +39,6 @@ plan
 *.log
 *.list
 *.json
+
+# macOS
+.DS_Store
