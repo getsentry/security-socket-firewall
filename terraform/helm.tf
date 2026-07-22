@@ -43,11 +43,44 @@ locals {
       }
     }
 
+    # failOpen=true: when the Socket API circuit breaker trips (or the API is
+    # unreachable), allow packages that have a cached verdict and fall back to
+    # allow for cache misses. Pair with Redis stale-while-revalidate below so
+    # the common case serves the last known-good decision instead of blocking.
+    # failOpenUnscanned stays false — unknown/unscanned packages are still blocked.
     socket = {
       existingSecret    = kubernetes_secret.socket_api_token.metadata[0].name
       existingSecretKey = "SOCKET_SECURITY_API_TOKEN"
-      failOpen          = false
+      failOpen          = true
       failOpenUnscanned = false
+      # Fresh window for Socket API verdicts (seconds). After this, entries are
+      # stale and revalidated; Redis retains them until redis.ttl.
+      cacheTtl = 600
+    }
+
+    # Shared Redis cache (Memorystore). Fresh for cacheTtl, then stale until
+    # redis.ttl — on API/breaker failure the firewall serves the stale verdict.
+    redis = {
+      enabled                 = true
+      host                    = google_redis_instance.verdict_cache.host
+      port                    = 6378 # Memorystore TLS port
+      ttl                     = 86400
+      existingSecret          = kubernetes_secret.redis_auth.metadata[0].name
+      existingSecretKey       = "REDIS_PASSWORD"
+      ssl                     = true
+      sslVerify               = true
+      sslServerName           = google_redis_instance.verdict_cache.host
+      sslCaCertExistingSecret = kubernetes_secret.redis_ca.metadata[0].name
+    }
+
+    # Circuit breaker is not a first-class chart value yet; pass via the
+    # raw-config escape hatch (top-level socket.yml section).
+    extraConfig = {
+      resilience = {
+        circuit_breaker = {
+          enabled = true
+        }
+      }
     }
 
     pathRouting = local.firewall_domain != "" ? {
@@ -148,6 +181,9 @@ resource "helm_release" "socket_firewall" {
   depends_on = [
     kubernetes_namespace.socket_firewall,
     kubernetes_secret.socket_api_token,
+    kubernetes_secret.redis_auth,
+    kubernetes_secret.redis_ca,
+    google_compute_firewall.allow_redis_egress,
   ]
 }
 

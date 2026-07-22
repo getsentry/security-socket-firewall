@@ -162,3 +162,9 @@ variable "path_routing_routes" {
     },
   ]
 }
+
+variable "redis_memory_size_gb" {
+  description = "Memorystore Redis memory size in GiB for the shared Socket API verdict cache"
+  type        = number
+  default     = 1
+}
