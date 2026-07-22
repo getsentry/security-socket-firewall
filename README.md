@@ -19,9 +19,10 @@ flowchart TB
     subgraph GCP["GCP Project"]
         CGW["Connect Gateway<br/>(IAM-auth, no public endpoint)"]
 
-        subgraph VPC["VPC (private, egress: TCP 443 only)"]
+        subgraph VPC["VPC (private, egress: TCP 443 + Redis 6378)"]
             GW["GKE Gateway<br/>Google-managed TLS"]
             PODS["Socket Firewall pods<br/>ClusterIP :80, replicas 2"]
+            REDIS["Memorystore Redis<br/>verdict cache (TLS)"]
             CP["Private control plane<br/>172.16.0.0/28"]
             NAT["Cloud NAT"]
         end
@@ -33,6 +34,7 @@ flowchart TB
     CGW -.->|proxied| CP
     CLIENTS -->|HTTPS| GW
     GW --> PODS
+    PODS --> REDIS
     PODS --> NAT
     NAT --> UPSTREAM
     SECRETS --> PODS
@@ -65,7 +67,7 @@ flowchart LR
     CGW -.->|proxied| MASTER
 ```
 
-Egress from GKE nodes is **deny-by-default** at the VPC firewall layer. Only **TCP 443** is permitted outbound (HTTPS to Socket.dev and upstream registries, and the fleet Connect agent's outbound channel to Google). Port 80 is intentionally blocked.
+Egress from GKE nodes is **deny-by-default** at the VPC firewall layer. Only **TCP 443** is permitted outbound to the internet (HTTPS to Socket.dev and upstream registries, and the fleet Connect agent's outbound channel to Google), plus **TCP 6378** to the Memorystore Redis host for the shared verdict cache. Port 80 is intentionally blocked.
 
 ## Data flow
 
@@ -74,25 +76,49 @@ sequenceDiagram
     participant Dev as Developer / CI
     participant GW as GKE Gateway
     participant FW as Socket Firewall Pod
+    participant Redis as Memorystore Redis
     participant Up as Socket.dev API / Registry
 
     Dev->>GW: GET https://sfw.example.com/npm/...
     GW->>FW: HTTP :80 (public TLS terminated at gateway)
-    FW->>Up: Scan (Socket.dev) + proxy download (registry)
-    Up-->>FW: Verdict + package artifact
+    FW->>Redis: Lookup cached verdict
+    alt Fresh / stale cache hit on API failure
+        Redis-->>FW: Last known-good verdict
+    else Cache miss or revalidation
+        FW->>Up: Scan (Socket.dev) + proxy download (registry)
+        Up-->>FW: Verdict + package artifact
+        FW->>Redis: Store verdict (TTL 24h stale window)
+    end
     FW-->>Dev: Scanned / allowed response
 ```
+
+## Fail-open and circuit breaker
+
+When the Socket API is degraded, the firewall's circuit breaker trips. With the previous `fail_open: false` and no shared cache, that defaulted to **blocking** packages.
+
+Current behavior (Helm values in [`helm.tf`](terraform/helm.tf)):
+
+| Setting | Value | Effect |
+|---------|-------|--------|
+| `socket.failOpen` | `true` | On API/breaker failure, allow when no better signal exists |
+| `socket.failOpenUnscanned` | `false` | Unscanned/unknown packages stay blocked |
+| `socket.cacheTtl` | `600` | Fresh verdict window (10 minutes) |
+| `redis.enabled` / `redis.ttl` | `true` / `86400` | Shared Memorystore cache; stale window 24 hours |
+| `extraConfig.resilience.circuit_breaker.enabled` | `true` | Prefer cached verdicts when the breaker opens |
+
+Stale-while-revalidate: fresh hits return immediately; between `cacheTtl` and `redis.ttl` the firewall revalidates with Socket and falls back to the stale verdict if the API (or breaker) fails. After `redis.ttl` the key expires and the next request must fetch fresh (or fail-open if still down).
 
 ## Components
 
 | Layer | Resource | Purpose |
 |-------|----------|---------|
 | **Network** | VPC + subnet + secondary ranges | Isolated network; subnet has VPC flow logs |
-| **Egress** | Deny-all + allow TCP 443 + Cloud NAT | Default-deny egress; HTTPS-only outbound via NAT scoped to the subnet |
+| **Egress** | Deny-all + allow TCP 443 + Redis 6378 + Cloud NAT | Default-deny egress; HTTPS to internet via NAT; TLS Redis to Memorystore |
 | **Compute** | Private GKE cluster + node pool | Shielded nodes, deletion protection, Calico NetworkPolicy, Binary Authorization |
 | **Encryption** | Cloud KMS key ring (3 keys) | CMEK for etcd secrets, node boot disks, and Secret Manager |
 | **Access** | Fleet membership + Connect Gateway | IAM-authenticated proxy to the private control plane; no public endpoint, bastion, or IAP tunnel |
-| **App** | Helm `socket-firewall` | Package firewall with path-based routing, HPA, pod anti-affinity, PDB |
+| **App** | Helm `socket-firewall` | Package firewall with path-based routing, HPA, pod anti-affinity, PDB; Redis-backed verdict cache with fail-open on breaker trip |
+| **Cache** | Memorystore Redis (AUTH + TLS) | Shared stale-while-revalidate cache across replicas so a tripped Socket API circuit breaker serves last known-good verdicts |
 | **Exposure** | GKE Gateway (`gke-l7-global-external-managed`) | External HTTPS when `firewall_domain` is set; `LoadBalancer` Service fallback when domain is unset |
 | **Secrets** | Secret Manager (CMEK) → K8s secret | `SOCKET_SECURITY_API_TOKEN` for Socket.dev |
 | **TLS** | Certificate Manager + GKE Gateway + SSL policy | Google-managed cert; HTTPS terminates at the LB (TLS 1.2 minimum) |
@@ -116,12 +142,13 @@ sequenceDiagram
 |---------|----------------|
 | **Encryption at rest** | CMEK for GKE etcd, node disks, and Secret Manager (90-day key rotation) |
 | **Encryption in transit** | GCP-managed TLS at the Gateway; SSL policy enforces RESTRICTED cipher suites and TLS 1.2+ |
-| **Network egress** | VPC firewall deny-all with explicit TCP 443 allow; Kubernetes egress governed by VPC rules |
+| **Network egress** | VPC firewall deny-all with explicit TCP 443 (internet) and TCP 6378 (Memorystore) allows; Kubernetes egress governed by VPC rules |
 | **Network ingress** | Calico NetworkPolicies default-deny ingress in the firewall namespace |
 | **Image admission** | Binary Authorization (`PROJECT_SINGLETON_POLICY_ENFORCE`) |
 | **Node hardening** | Shielded VMs, dedicated node SA (no `cloud-platform` scope), Workload Identity, legacy metadata endpoints disabled |
 | **Control plane** | Private endpoint only — no public API server; reachable solely via Connect Gateway (IAM-authenticated) |
 | **Availability** | HPA, pod anti-affinity, PodDisruptionBudget (`minAvailable: 1`), 2-node minimum. **Zonal cluster** (`us-central1-a`) — these protect against single-node loss, not a full-zone outage, and the control plane has no HA SLA |
+| **Verdict cache** | Memorystore Redis (AUTH + in-transit TLS); fresh TTL 10m, stale window 24h; `fail_open: true` so a tripped Socket API circuit breaker serves cached verdicts instead of blocking |
 | **IAM least privilege** | Custom Terraform roles replace `container.admin`/`secretmanager.secretAdmin`/`cloudkms.admin` (no project-wide secret payload access); read-only plan SA distinct from write apply SA; fleet write access is bootstrap-only |
 | **Audit** | VPC flow logs and firewall rule logging with full metadata |
 
@@ -163,7 +190,8 @@ The Gateway terminates the public, browser-trusted certificate and forwards to t
 | [`fleet.tf`](terraform/fleet.tf) | Fleet (GKE Hub) membership enabling Connect Gateway access to the private control plane |
 | [`iam.tf`](terraform/iam.tf) | GKE node SA, custom least-privilege Terraform roles (apply + plan SA), IAM bindings |
 | [`secrets.tf`](terraform/secrets.tf) | CMEK-encrypted Secret Manager secret for the Socket API token |
-| [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release (incl. pod `securityContext`/`fsGroup` so nginx can read the generated cert key) |
+| [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release (fail-open + Redis stale cache + circuit breaker; pod `securityContext`/`fsGroup` so nginx can read the generated cert key) |
+| [`redis.tf`](terraform/redis.tf) | Memorystore Redis (PSA, AUTH, TLS CA) + K8s secrets for the firewall verdict cache |
 | [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute, HealthCheckPolicy |
 | [`variables.tf`](terraform/variables.tf) | Input variable declarations (chart/image versions are required, no default) |
 | [`terraform.tfvars`](terraform/terraform.tfvars) | Concrete pinned values Terraform auto-loads (project, SA emails, node counts, `firewall_domain`, chart/image versions) |
@@ -196,6 +224,8 @@ Roles Terraform grants to the **apply SA**:
 | Custom `socketFirewallTfSecretManager` | Manage Secret Manager resources (no project-wide payload read) |
 | `roles/secretmanager.secretAccessor` | Read the Socket API token (resource-scoped) |
 | Custom `socketFirewallTfKmsManager` | CMEK key ring / key management (no key or version destruction) |
+| `roles/redis.admin` | Memorystore Redis instance for the shared verdict cache |
+| `roles/servicenetworking.networksAdmin` | Private Service Access peering for Memorystore |
 | `roles/certificatemanager.editor` | Certificate Manager certs and DNS authorizations |
 | `roles/iam.serviceAccountUser` | Attach the node SA to node-pool VMs |
 | `roles/gkehub.gatewayEditor` + `roles/gkehub.viewer` | Reach the control plane via Connect Gateway; refresh the fleet membership |

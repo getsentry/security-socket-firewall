@@ -246,6 +246,22 @@ resource "google_project_iam_member" "tf_sa_certificate_manager_editor" {
   member  = local.tf_sa_member
 }
 
+# Memorystore Redis instance lifecycle (verdict cache for the firewall)
+resource "google_project_iam_member" "tf_sa_redis_admin" {
+  project = var.project_id
+  role    = "roles/redis.admin"
+  member  = local.tf_sa_member
+}
+
+# Private Service Access for Memorystore (allocate peering range + connection).
+# compute.networkAdmin covers most of this; servicenetworking.networksAdmin is
+# required for google_service_networking_connection.
+resource "google_project_iam_member" "tf_sa_servicenetworking" {
+  project = var.project_id
+  role    = "roles/servicenetworking.networksAdmin"
+  member  = local.tf_sa_member
+}
+
 # ---------------------------------------------------------------------------
 # Fleet Connect Gateway access for the apply SA
 # ---------------------------------------------------------------------------
@@ -353,6 +369,11 @@ resource "google_project_iam_custom_role" "tf_plan_reader" {
     # Fleet / GKE Hub
     "gkehub.memberships.get",
     "gkehub.memberships.list",
+    # Memorystore Redis
+    "redis.instances.get",
+    "redis.instances.list",
+    # Private Service Access connection used by Memorystore
+    "servicenetworking.services.get",
   ]
 }
 

@@ -71,6 +71,28 @@ resource "google_compute_firewall" "allow_egress" {
   }
 }
 
+# Memorystore Redis with in-transit encryption listens on 6378 (not 6379).
+# Scoped to the instance host so the broader deny-all egress still applies
+# everywhere else.
+resource "google_compute_firewall" "allow_redis_egress" {
+  name      = "${var.cluster_name}-allow-redis-egress"
+  network   = google_compute_network.main.id
+  direction = "EGRESS"
+  priority  = 1000
+
+  allow {
+    protocol = "tcp"
+    ports    = ["6378"]
+  }
+
+  destination_ranges = ["${google_redis_instance.verdict_cache.host}/32"]
+  target_tags        = ["gke-${var.cluster_name}"]
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
 # Cloud NAT so private nodes can reach the internet
 resource "google_compute_router" "main" {
   name    = "${var.cluster_name}-router"

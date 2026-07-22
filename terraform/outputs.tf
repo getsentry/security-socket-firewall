@@ -58,3 +58,13 @@ output "firewall_domain" {
   description = "Normalized domain used for path-based routing"
   value       = local.firewall_domain != "" ? local.firewall_domain : null
 }
+
+output "redis_host" {
+  description = "Memorystore Redis host for the shared Socket API verdict cache"
+  value       = google_redis_instance.verdict_cache.host
+}
+
+output "redis_port" {
+  description = "Memorystore Redis TLS port (in-transit encryption)"
+  value       = 6378
+}

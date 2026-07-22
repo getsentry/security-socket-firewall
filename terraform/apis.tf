@@ -21,6 +21,7 @@ locals {
     "binaryauthorization.googleapis.com",  # image admission policy enforcement
     "gkehub.googleapis.com",               # fleet membership for the cluster
     "connectgateway.googleapis.com",       # Connect Gateway proxy to the private control plane
+    "redis.googleapis.com",                # Memorystore Redis for shared verdict cache
   ])
 }
 
