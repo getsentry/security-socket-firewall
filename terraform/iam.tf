@@ -369,8 +369,10 @@ resource "google_project_iam_custom_role" "tf_plan_reader" {
     # Fleet / GKE Hub
     "gkehub.memberships.get",
     "gkehub.memberships.list",
-    # Memorystore Redis
+    # Memorystore Redis (getAuthString is required to refresh auth_string on
+    # google_redis_instance — used by kubernetes_secret.redis_auth during plan)
     "redis.instances.get",
+    "redis.instances.getAuthString",
     "redis.instances.list",
     # Private Service Access connection used by Memorystore
     "servicenetworking.services.get",
