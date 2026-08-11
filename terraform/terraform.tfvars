@@ -14,4 +14,4 @@ firewall_domain = "sfw.security.sentry.io."
 
 replica_count      = 2
 helm_chart_version = "0.11.1"
-firewall_image_tag = "2.0.14"
+firewall_image_tag = "2.1.0"
