@@ -85,8 +85,12 @@ resource "kubernetes_secret" "redis_ca" {
     namespace = kubernetes_namespace.socket_firewall.metadata[0].name
   }
 
+  # Concatenate every CA. Memorystore publishes more than one during rotation;
+  # trusting only [0] would fail verification against the new leaf.
   data = {
-    "ca.crt" = google_redis_instance.verdict_cache.server_ca_certs[0].cert
+    "ca.crt" = join("\n", [
+      for c in google_redis_instance.verdict_cache.server_ca_certs : c.cert
+    ])
   }
 
   type = "Opaque"
