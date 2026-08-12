@@ -259,8 +259,8 @@ The firewall image tag (`firewall_image_tag`) and Helm chart version (`helm_char
 
 | Variable | Pinned (in `terraform.tfvars`) | Upstream source |
 |----------|----------------------------|-----------------|
-| `helm_chart_version` | `0.3.0` | [socket-firewall Helm index](https://socketdev-demo.github.io/socket-firewall-helm/index.yaml) |
-| `firewall_image_tag` | `1.1.327` | [`socketdev/socket-registry-firewall`](https://hub.docker.com/r/socketdev/socket-registry-firewall) on Docker Hub |
+| `helm_chart_version` | `0.11.2` | [socket-firewall Helm index](https://socketdev-demo.github.io/socket-firewall-helm/index.yaml) |
+| `firewall_image_tag` | `2.1.1` | [`socketdev/socket-registry-firewall`](https://hub.docker.com/r/socketdev/socket-registry-firewall) on Docker Hub |
 
 #### Automated checks
 
@@ -376,6 +376,7 @@ gcloud logging read \
 | `helm` release times out (`context deadline exceeded`) but pods are fine | `wait = true` timeout too short during a slow first rollout | Increase `timeout`; a *failed* release gets tainted and reinstalled each apply, so reconcile it (`helm uninstall` / `helm rollback`) before retrying |
 | Pods `CrashLoopBackOff`, logs show `cannot load certificate key ... Permission denied` | Cert-generator init runs as UID 1000 but the image runs as UID 1001, so nginx can't read the `0600` key | `podSecurityContext.fsGroup` + cert-generator `runAsUser` aligned to the image UID (set in `helm.tf`) |
 | `503 no healthy upstream` while pods are `Ready` | LB health check probes `/` (its default), which the firewall doesn't answer `200` | `HealthCheckPolicy` pointing the LB health check at `/health` (in `tls.tf`) |
+| CI package downloads 503; logs show `lua ssl certificate verify error: (21: unable to verify the first certificate)` to Redis `:6378` | Image ≤ 2.0.10 writes the Memorystore CA bundle into `/etc/nginx/ssl`, which the chart mounts read-only. The write fails, startup continues on OS roots, and every Redis TLS handshake fails. Shared cache is dead; bursty CI then 503s. | Pin `firewall_image_tag` ≥ `2.1.1` (writes the bundle to writable `/app/ca-bundle.pem`). Confirm Binary Authorization allows the new digest before apply. |
 | Gateway "load balancer" not visible | The data-plane LB is a Gateway-managed **global external ALB** (`gkegw1-…`), not a `LoadBalancer` Service | `kubectl get gateway -A` for the address; `gcloud compute forwarding-rules list --global` |
 
 ### Verifying the data plane
