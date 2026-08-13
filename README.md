@@ -108,6 +108,23 @@ Current behavior (Helm values in [`helm.tf`](terraform/helm.tf)):
 
 Stale-while-revalidate: fresh hits return immediately; between `cacheTtl` and `redis.ttl` the firewall revalidates with Socket and falls back to the stale verdict if the API (or breaker) fails. After `redis.ttl` the key expires and the next request must fetch fresh (or fail-open if still down).
 
+## Availability tuning
+
+A client-visible `503` from this stack is almost never the upstream registry — it is the ALB having no healthy backend to send to, or a backend that went away mid-request. The settings below exist to close the three ways that happens. Note that CI is where this surfaces first: a lockfile resolve is a burst of parallel artifact fetches, so it hits saturation and pod churn that ordinary developer installs never reach.
+
+| `statusDetails` | Failure mode | Setting | Where |
+|-----------------|--------------|---------|-------|
+| `backend_connection_closed_before_data_sent_to_client` | **Keepalive race.** The LB holds idle connections to the backend for a fixed, non-configurable 600s. The chart's default `keepaliveTimeout: 65` makes nginx close them first, and a request that races the close becomes a 503. Independent of traffic and deploys, which is what makes it look random | `keepaliveTimeout = 620`, per Google's documented fix | [`helm.tf`](terraform/helm.tf) |
+| `backend_connection_closed_before_data_sent_to_client` | **Pod churn.** A pod leaving the NEG (rollout, HPA scale-down, node autoscale/repair/upgrade) has its in-flight requests cut | `connectionDraining.drainingTimeoutSec = 60` and `terminationGracePeriodSeconds = 210` (Google's `Tgrace > TpreStop + Tdrain + Tbuffer`) | [`tls.tf`](terraform/tls.tf), [`helm.tf`](terraform/helm.tf) |
+| `backend_connection_closed_before_data_sent_to_client` | **Pod OOM-killed or evicted**, dropping every request it was serving | Memory request == limit at `3Gi` (never above its request, so not ranked for eviction). The previous `768Mi` limit is the value the chart calls out as OOM-killing on large package indexes | [`helm.tf`](terraform/helm.tf) |
+| `failed_to_pick_backend` | **Health check ejection.** Burst saturates the pods, `/health` slows, the LB ejects the backend — and with few replicas that shifts load onto the rest and cascades | `nginx.workerProcesses = 2` matched to the 1.5-CPU limit (the chart's default 4 oversubscribes the cgroup quota), `unhealthyThreshold = 3` / `healthyThreshold = 1`, HPA target 60%, and `node_max_count` headroom so scale-up isn't capped | [`helm.tf`](terraform/helm.tf), [`tls.tf`](terraform/tls.tf), [`terraform.tfvars`](terraform/terraform.tfvars) |
+
+> **Known residue:** the chart exposes no `preStop` hook, so `TpreStop` is 0 and nothing holds a pod open for the ~120s an endpoint can take to leave the NEG. In-flight requests are covered by draining, but requests the LB dispatches during that window still land on a shutting-down pod. Expect `backend_connection_closed_before_data_sent_to_client` to shrink substantially rather than reach zero; closing the gap needs `lifecycle.preStop` support upstream.
+
+The firewall's own resilience settings (fail-open, circuit breaker, Redis stale cache) do **not** cover any of these — they govern what the firewall decides when the *Socket API* is degraded, not whether the load balancer has a pod to talk to.
+
+Pod resources stay below the chart's `4 CPU / 8Gi` default, which is sized for metadata filtering (disabled here) and would not schedule on `e2-standard-2` nodes. Requests are sized so one pod fills most of a node, which also keeps replicas on separate nodes. Only `node_min_count` is billed at idle; `node_max_count` is burst headroom.
+
 ## Components
 
 | Layer | Resource | Purpose |
@@ -120,6 +137,7 @@ Stale-while-revalidate: fresh hits return immediately; between `cacheTtl` and `r
 | **App** | Helm `socket-firewall` | Package firewall with path-based routing, HPA, pod anti-affinity, PDB; Redis-backed verdict cache with fail-open on breaker trip |
 | **Cache** | Memorystore Redis (AUTH + TLS) | Shared stale-while-revalidate cache across replicas so a tripped Socket API circuit breaker serves last known-good verdicts |
 | **Exposure** | GKE Gateway (`gke-l7-global-external-managed`) | External HTTPS when `firewall_domain` is set; `LoadBalancer` Service fallback when domain is unset |
+| **Backend tuning** | GCPBackendPolicy | 60s connection draining so pod churn doesn't reset in-flight requests, 300s backend timeout for large artifacts, LB request logging for 5xx attribution |
 | **Secrets** | Secret Manager (CMEK) → K8s secret | `SOCKET_SECURITY_API_TOKEN` for Socket.dev |
 | **TLS** | Certificate Manager + GKE Gateway + SSL policy | Google-managed cert; HTTPS terminates at the LB (TLS 1.2 minimum) |
 | **Policy** | Kubernetes NetworkPolicies | Default-deny ingress in the firewall namespace (`enable_network_policies = true`) |
@@ -174,6 +192,7 @@ When `firewall_domain` is set, Terraform always provisions GCP-managed TLS:
 4. A **global SSL policy** (`RESTRICTED`, TLS 1.2 minimum) attached via **GCPGatewayPolicy**
 5. An **HTTPRoute** — forwards traffic to the firewall pods (backend `port 80`, plain HTTP)
 6. A **HealthCheckPolicy** — points the load-balancer health check at `/health`. Without it the LB defaults to probing `/`, which the firewall does not answer with `200`, so every backend is marked unhealthy (`no healthy upstream`)
+7. A **GCPBackendPolicy** — connection draining, backend timeout, and request logging on the backend service (see [Availability tuning](#availability-tuning))
 
 The Gateway terminates the public, browser-trusted certificate and forwards to the pods over **plain HTTP on port 80** (cluster-internal `ClusterIP`, never externally reachable). The firewall image nevertheless always configures an HTTPS listener (`:8443`) that requires a certificate to load, so the chart's cert-generator init container produces a **self-signed certificate** purely so nginx will boot — it is not on the Gateway's data path.
 
@@ -192,7 +211,7 @@ The Gateway terminates the public, browser-trusted certificate and forwards to t
 | [`secrets.tf`](terraform/secrets.tf) | CMEK-encrypted Secret Manager secret for the Socket API token |
 | [`helm.tf`](terraform/helm.tf) | Namespace, K8s secret, Helm release (fail-open + Redis stale cache + circuit breaker; pod `securityContext`/`fsGroup` so nginx can read the generated cert key) |
 | [`redis.tf`](terraform/redis.tf) | Memorystore Redis (PSA, AUTH, TLS CA) + K8s secrets for the firewall verdict cache |
-| [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute, HealthCheckPolicy |
+| [`tls.tf`](terraform/tls.tf) | Certificate Manager, SSL policy, GKE Gateway, GCPGatewayPolicy, HTTPRoute, HealthCheckPolicy, GCPBackendPolicy |
 | [`variables.tf`](terraform/variables.tf) | Input variable declarations (chart/image versions are required, no default) |
 | [`terraform.tfvars`](terraform/terraform.tfvars) | Concrete pinned values Terraform auto-loads (project, SA emails, node counts, `firewall_domain`, chart/image versions) |
 | [`outputs.tf`](terraform/outputs.tf) | Cluster credentials, gateway IP, DNS auth record, health URL |
@@ -377,7 +396,34 @@ gcloud logging read \
 | Pods `CrashLoopBackOff`, logs show `cannot load certificate key ... Permission denied` | Cert-generator init runs as UID 1000 but the image runs as UID 1001, so nginx can't read the `0600` key | `podSecurityContext.fsGroup` + cert-generator `runAsUser` aligned to the image UID (set in `helm.tf`) |
 | `503 no healthy upstream` while pods are `Ready` | LB health check probes `/` (its default), which the firewall doesn't answer `200` | `HealthCheckPolicy` pointing the LB health check at `/health` (in `tls.tf`) |
 | CI package downloads 503; logs show `lua ssl certificate verify error: (21: unable to verify the first certificate)` to Redis `:6378` | Image ≤ 2.0.10 writes the Memorystore CA bundle into `/etc/nginx/ssl`, which the chart mounts read-only. The write fails, startup continues on OS roots, and every Redis TLS handshake fails. Shared cache is dead; bursty CI then 503s. | Pin `firewall_image_tag` ≥ `2.1.1` (writes the bundle to writable `/app/ca-bundle.pem`). Confirm Binary Authorization allows the new digest before apply. |
+| Intermittent 503 with no pod-level error | Backend went away mid-request or the LB had no healthy backend — pod churn, OOM kill/eviction, or burst saturation | See [Availability tuning](#availability-tuning); attribute the specific cause with `statusDetails` in the LB logs (below) before changing anything |
 | Gateway "load balancer" not visible | The data-plane LB is a Gateway-managed **global external ALB** (`gkegw1-…`), not a `LoadBalancer` Service | `kubectl get gateway -A` for the address; `gcloud compute forwarding-rules list --global` |
+
+### Attributing a 5xx
+
+The GCPBackendPolicy in [`tls.tf`](terraform/tls.tf) enables LB request logging, so every response carries a `statusDetails` naming the cause. Group the 5xx responses by it:
+
+```bash
+gcloud logging read \
+  'resource.type="http_load_balancer"
+   httpRequest.status>=500' \
+  --project <project_id> --limit 200 --freshness=6h \
+  --format='value(jsonPayload.statusDetails)' | sort | uniq -c | sort -rn
+```
+
+| `statusDetails` | Meaning | Where to look |
+|-----------------|---------|---------------|
+| `backend_connection_closed_before_data_sent_to_client` | Backend closed the connection first — keepalive race, pod termination, or an OOM kill | `keepaliveTimeout`, connection draining, grace period, restart counts |
+| `failed_to_pick_backend` | No backend passing the health check at that moment | Health check thresholds, pod readiness, burst saturation |
+| `failed_to_connect_to_backend` | Backend reachable but refusing connections — saturated, or listener already closed while still in the NEG | CPU limits and worker count, the preStop gap above |
+| `response_sent_by_backend` | The firewall itself returned the 5xx | Container logs (Cloud Logging query above) |
+
+Confirm or rule out OOM kills and restarts directly:
+
+```bash
+kubectl get pods -n socket-firewall \
+  -o custom-columns='NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.reason'
+```
 
 ### Verifying the data plane
 
