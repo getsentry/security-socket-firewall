@@ -11,9 +11,37 @@ locals {
       pullPolicy = "IfNotPresent"
     }
 
+    # CPU-driven HPA. Target 60% rather than the chart's 70% so a CI burst
+    # starts adding replicas before the running pods are already saturated —
+    # scale-up has to wait on metrics, pod start, and (past node_min_count) a
+    # node. maxReplicas is bounded by node_max_count, since one pod fills most
+    # of a node at the requests below; asking for more would leave pods Pending.
     autoscaling = {
-      enabled = true
+      enabled                        = true
+      minReplicas                    = var.replica_count
+      maxReplicas                    = var.max_replica_count
+      targetCPUUtilizationPercentage = 60
     }
+
+    # The load balancer holds idle keepalive connections to the backend for a
+    # fixed 600s that GCP does not let you configure. The chart's default of 65s
+    # means nginx closes an idle connection the LB still considers usable; when a
+    # request races that close the client gets a 503
+    # (backend_connection_closed_before_data_sent_to_client — the top entry in
+    # this deployment's LB logs). Google's documented fix is a backend keepalive
+    # above 600s, recommended 620.
+    keepaliveTimeout = 620
+
+    # Google's guidance for the same error on GKE NEG backends:
+    # Tgrace > TpreStop + Tdrain + Tbuffer, at least 210s. Tdrain is the 60s
+    # connection draining in tls.tf.
+    #
+    # TpreStop is 0 here because the chart exposes no preStop hook, so nothing
+    # holds the pod open for the ~120s the endpoint can take to leave the NEG.
+    # In-flight requests are covered, but requests the LB sends in that window
+    # still land on a shutting-down pod. That residue is the reason to expect
+    # this error to shrink rather than vanish.
+    terminationGracePeriodSeconds = 210
 
     # The socket-registry-firewall image runs as UID 1001, but the
     # chart's cert-generator init container defaults to runAsUser 1000 and writes
@@ -110,15 +138,34 @@ locals {
       generateSelfSigned = true
     }
 
+    # The old 768Mi limit was the value the chart explicitly calls out as
+    # OOM-killing on large package indexes, and 512Mi requests put the pod in
+    # Burstable QoS, so it was also an eviction candidate under node pressure.
+    # An OOM kill or eviction drops every in-flight request on that pod, which
+    # reaches the client as a 503. Memory request == limit so the pod never sits
+    # above its request and is not ranked for eviction.
+    #
+    # Still below the chart's 4 CPU / 8Gi default: that assumes metadata
+    # filtering (disabled here) and would not schedule on the current nodes.
+    # These requests fit one pod per e2-standard-2 node alongside system pods,
+    # which also keeps replicas on separate nodes.
     resources = {
       requests = {
-        cpu    = "500m"
-        memory = "512Mi"
+        cpu    = "750m"
+        memory = "3Gi"
       }
       limits = {
-        cpu    = "1"
-        memory = "768Mi"
+        cpu    = "1500m"
+        memory = "3Gi"
       }
+    }
+
+    # Default is 4 workers. With a 1.5-CPU limit that oversubscribes the cgroup
+    # quota and the workers throttle each other, which shows up first as slow
+    # /health responses — enough of them and the LB drops the backend and
+    # returns 503 while the pod is still Ready.
+    nginx = {
+      workerProcesses = 2
     }
 
     # Spread replicas across nodes so a single node loss doesn't take down

@@ -207,12 +207,71 @@ resource "kubectl_manifest" "socket_firewall_health_check" {
     }
     spec = {
       default = {
+        # Defaults (unhealthyThreshold 2, healthyThreshold 2, 5s interval) eject
+        # a backend after ~10s of slow /health responses and then need two
+        # successes to bring it back. With only a couple of replicas, ejecting
+        # one doubles load on the rest and can cascade — which is what
+        # failed_to_pick_backend in the LB logs looks like. Tolerate one more
+        # consecutive failure, and return the backend on the first success.
+        checkIntervalSec   = 5
+        timeoutSec         = 5
+        unhealthyThreshold = 3
+        healthyThreshold   = 1
         config = {
           type = "HTTP"
           httpHealthCheck = {
             portSpecification = "USE_SERVING_PORT"
             requestPath       = "/health"
           }
+        }
+      }
+      targetRef = {
+        group = ""
+        kind  = "Service"
+        name  = helm_release.socket_firewall.name
+      }
+    }
+  })
+
+  depends_on = [helm_release.socket_firewall]
+}
+
+# Backend-service behaviour for the Gateway-managed ALB. Without this the
+# backend runs on GCP defaults: connection draining disabled (0s) and a 30s
+# request timeout.
+#
+# drainingTimeoutSec: with draining off, a pod leaving the NEG (rollout, HPA
+# scale-down, node autoscale/repair/upgrade) has its in-flight connections cut
+# immediately, which reaches the client as a sporadic 503. The chart has no
+# preStop hook, so LB-side draining is the drain available;
+# terminationGracePeriodSeconds in helm.tf is set to outlive this window.
+#
+# timeoutSec: the firewall streams package artifacts, and large wheels
+# (torch, nvidia-*) can exceed the 30s default on a slow upstream. 300s matches
+# the firewall's own proxy.read_timeout default.
+#
+# logging: LB request logs carry jsonPayload.statusDetails, which names the
+# reason for a 5xx (failed_to_pick_backend, backend_connection_closed_*, ...).
+# Without it a 503 seen by a client is not attributable to a cause. Add
+# sampleRate (1-1000000) to cut ingest volume once the cause is known.
+resource "kubectl_manifest" "socket_firewall_backend_policy" {
+  count = local.use_gcp_managed_tls ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "networking.gke.io/v1"
+    kind       = "GCPBackendPolicy"
+    metadata = {
+      name      = "${var.cluster_name}-backend-policy"
+      namespace = var.firewall_namespace
+    }
+    spec = {
+      default = {
+        timeoutSec = 300
+        connectionDraining = {
+          drainingTimeoutSec = 60
+        }
+        logging = {
+          enabled = true
         }
       }
       targetRef = {

@@ -84,9 +84,9 @@ variable "node_min_count" {
 }
 
 variable "node_max_count" {
-  description = "Maximum number of nodes (autoscaling)"
+  description = "Maximum number of nodes (autoscaling). Only the floor (node_min_count) is billed at idle, so this is headroom for CI bursts rather than steady-state cost."
   type        = number
-  default     = 3
+  default     = 6
 }
 
 variable "kubernetes_version" {
@@ -126,9 +126,15 @@ variable "firewall_image_tag" {
 }
 
 variable "replica_count" {
-  description = "Number of firewall pod replicas (ignored when HPA is enabled; used as a baseline for the chart)"
+  description = "Baseline number of firewall pod replicas (used as the HPA floor)"
   type        = number
   default     = 2
+}
+
+variable "max_replica_count" {
+  description = "HPA ceiling for firewall pod replicas. Keep at or below node_max_count — one pod fills most of a node, so a higher ceiling only produces Pending pods."
+  type        = number
+  default     = 6
 }
 
 variable "enable_network_policies" {
