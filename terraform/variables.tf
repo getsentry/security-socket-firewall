@@ -71,6 +71,17 @@ variable "services_cidr" {
   default     = "10.30.0.0/16"
 }
 
+variable "master_ipv4_cidr_block" {
+  description = "Private GKE control-plane CIDR (/28). Nodes must be able to egress here on TCP 443 (API) and 8132 (Konnectivity)."
+  type        = string
+  default     = "172.16.0.0/28"
+
+  validation {
+    condition     = can(cidrhost(var.master_ipv4_cidr_block, 0)) && endswith(var.master_ipv4_cidr_block, "/28")
+    error_message = "master_ipv4_cidr_block must be a valid /28 CIDR (GKE private cluster requirement)."
+  }
+}
+
 variable "node_machine_type" {
   description = "Machine type for GKE nodes"
   type        = string

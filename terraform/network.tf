@@ -71,6 +71,32 @@ resource "google_compute_firewall" "allow_egress" {
   }
 }
 
+# Konnectivity (control-plane ↔ node tunnel). Without this, deny-all egress
+# blocks re-dials to the private master on :8132 after agent restarts / node
+# churn. Symptoms: intermittent "dial tcp 172.16.0.x:8132: i/o timeout" and
+# "Failed to scrape node ... :10250 ... context deadline exceeded" (kubelet
+# scrape rides the same tunnel). Re-runs often succeed once a live tunnel is
+# re-established on a remaining agent. Scoped to the master /28 only.
+# See: https://cloud.google.com/kubernetes-engine/docs/troubleshooting/kubectl
+resource "google_compute_firewall" "allow_master_egress" {
+  name      = "${var.cluster_name}-allow-master-egress"
+  network   = google_compute_network.main.id
+  direction = "EGRESS"
+  priority  = 1000
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443", "8132"]
+  }
+
+  destination_ranges = [var.master_ipv4_cidr_block]
+  target_tags        = ["gke-${var.cluster_name}"]
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
 # Memorystore Redis with in-transit encryption listens on 6378 (not 6379).
 # Scoped to the instance host so the broader deny-all egress still applies
 # everywhere else.

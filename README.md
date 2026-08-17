@@ -19,7 +19,7 @@ flowchart TB
     subgraph GCP["GCP Project"]
         CGW["Connect Gateway<br/>(IAM-auth, no public endpoint)"]
 
-        subgraph VPC["VPC (private, egress: TCP 443 + Redis 6378)"]
+        subgraph VPC["VPC (private, egress: TCP 443 + Redis 6378 + master 443/8132)"]
             GW["GKE Gateway<br/>Google-managed TLS"]
             PODS["Socket Firewall pods<br/>ClusterIP :80, replicas 2"]
             REDIS["Memorystore Redis<br/>verdict cache (TLS)"]
@@ -60,14 +60,22 @@ flowchart LR
     end
 
     CLIENT -->|HTTPS| NODES
-    NODES -->|egress 443 only| NAT
+    NODES -->|egress 443 + Redis| NAT
     NAT --> INTERNET
-    NODES -.->|private| MASTER
+    NODES -.->|API 443 + Konnectivity 8132| MASTER
     ADMIN -->|IAM-auth| CGW
     CGW -.->|proxied| MASTER
 ```
 
-Egress from GKE nodes is **deny-by-default** at the VPC firewall layer. Only **TCP 443** is permitted outbound to the internet (HTTPS to Socket.dev and upstream registries, and the fleet Connect agent's outbound channel to Google), plus **TCP 6378** to the Memorystore Redis host for the shared verdict cache. Port 80 is intentionally blocked.
+Egress from GKE nodes is **deny-by-default** at the VPC firewall layer. Allowed exceptions:
+
+| Destination | Ports | Why |
+|-------------|-------|-----|
+| `0.0.0.0/0` | TCP 443 | Upstream registries, Socket.dev API, Connect agent → Google |
+| Memorystore host | TCP 6378 | Shared verdict-cache Redis (TLS) |
+| Control plane (`master_ipv4_cidr_block`, default `172.16.0.0/28`) | TCP 443, **8132** | API + Konnectivity tunnel (required; without 8132, agent re-dials fail and kubelet scrapes time out) |
+
+Port 80 is intentionally blocked.
 
 ## Data flow
 
@@ -130,7 +138,7 @@ Pod resources stay below the chart's `4 CPU / 8Gi` default, which is sized for m
 | Layer | Resource | Purpose |
 |-------|----------|---------|
 | **Network** | VPC + subnet + secondary ranges | Isolated network; subnet has VPC flow logs |
-| **Egress** | Deny-all + allow TCP 443 + Redis 6378 + Cloud NAT | Default-deny egress; HTTPS to internet via NAT; TLS Redis to Memorystore |
+| **Egress** | Deny-all + allow TCP 443 + Redis 6378 + master 443/8132 + Cloud NAT | Default-deny egress; HTTPS via NAT; TLS Redis; Konnectivity to private control plane |
 | **Compute** | Private GKE cluster + node pool | Shielded nodes, deletion protection, Calico NetworkPolicy, Binary Authorization |
 | **Encryption** | Cloud KMS key ring (3 keys) | CMEK for etcd secrets, node boot disks, and Secret Manager |
 | **Access** | Fleet membership + Connect Gateway | IAM-authenticated proxy to the private control plane; no public endpoint, bastion, or IAP tunnel |
@@ -160,7 +168,7 @@ Pod resources stay below the chart's `4 CPU / 8Gi` default, which is sized for m
 |---------|----------------|
 | **Encryption at rest** | CMEK for GKE etcd, node disks, and Secret Manager (90-day key rotation) |
 | **Encryption in transit** | GCP-managed TLS at the Gateway; SSL policy enforces RESTRICTED cipher suites and TLS 1.2+ |
-| **Network egress** | VPC firewall deny-all with explicit TCP 443 (internet) and TCP 6378 (Memorystore) allows; Kubernetes egress governed by VPC rules |
+| **Network egress** | VPC firewall deny-all with explicit TCP 443 (internet), TCP 6378 (Memorystore), and TCP 443/8132 (private control plane / Konnectivity) allows; Kubernetes NetworkPolicies are ingress-only in the app namespace |
 | **Network ingress** | Calico NetworkPolicies default-deny ingress in the firewall namespace |
 | **Image admission** | Binary Authorization (`PROJECT_SINGLETON_POLICY_ENFORCE`) |
 | **Node hardening** | Shielded VMs, dedicated node SA (no `cloud-platform` scope), Workload Identity, legacy metadata endpoints disabled |
@@ -390,6 +398,7 @@ gcloud logging read \
 | `cannot create REST client: no client config` (plan) | `kubernetes_manifest` does a live API call at plan time before the cluster exists | Gateway manifests use `kubectl_manifest` (alekc/kubectl) with `lazy_load = true` instead |
 | `invalid configuration: no configuration has been provided` (kubectl provider) | alekc/kubectl ≥ 2.3 validates eagerly when the cluster endpoint is still unknown | `lazy_load = true` (requires provider ≥ 2.4) |
 | `dial tcp 172.16.0.x:443: i/o timeout` | Running against the private endpoint directly from outside the VPC | Use Connect Gateway (the configured provider host), not the direct endpoint |
+| Intermittent `dial tcp 172.16.0.x:8132: i/o timeout` and/or `Failed to scrape node ... :10250 ... context deadline exceeded` (re-run often fixes) | Deny-all egress blocked Konnectivity re-dials to the control plane after agent/node churn; kubelet scrapes use the same tunnel | `allow_master_egress` in `network.tf` (TCP 443 + 8132 → `master_ipv4_cidr_block`) |
 | Certificate stuck `PROVISIONING`, `CNAME_MISMATCH` | The `_acme-challenge.<domain>` validation CNAME isn't published / not propagated | Publish `terraform output tls_dns_authorization_record`; Certificate Manager retries on backoff (often 15–60 min) |
 | TLS handshake reset on the hostname | Managed cert not yet `ACTIVE` | Wait for `ACTIVE`, then allow a few minutes for the LB frontend to pick it up |
 | `helm` release times out (`context deadline exceeded`) but pods are fine | `wait = true` timeout too short during a slow first rollout | Increase `timeout`; a *failed* release gets tainted and reinstalled each apply, so reconcile it (`helm uninstall` / `helm rollback`) before retrying |
