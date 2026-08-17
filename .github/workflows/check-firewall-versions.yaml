@@ -26,10 +26,16 @@ jobs:
 
       - name: Check for newer chart and image versions
         id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           TF=terraform/terraform.tfvars
+          IMAGE_REPO=SocketDev/socket-registry-firewall
+          CHART_INDEX_URL=https://socketdev-demo.github.io/socket-firewall-helm/index.yaml
+          CHART_SOURCE_URL=https://github.com/SocketDev/socket-registry-firewall-deployments
+          BODY_FILE="${RUNNER_TEMP}/pr-body.md"
 
           read_tfvar() {
             local val
@@ -51,11 +57,27 @@ jobs:
             [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ] && [ "$1" != "$2" ]
           }
 
+          gh_api() {
+            local args=(-fsSL
+              -H "Accept: application/vnd.github+json"
+              -H "X-GitHub-Api-Version: 2022-11-28")
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+            fi
+            curl "${args[@]}" "$1"
+          }
+
           current_chart=$(read_tfvar helm_chart_version)
           current_image=$(read_tfvar firewall_image_tag)
 
-          latest_chart=$(curl -fsSL https://socketdev-demo.github.io/socket-firewall-helm/index.yaml \
+          chart_index=$(curl -fsSL "$CHART_INDEX_URL")
+          latest_chart=$(printf '%s\n' "$chart_index" \
             | grep -E '^\s+version:' | awk '{print $2}' | sort -V | tail -1)
+          latest_chart_app=$(printf '%s\n' "$chart_index" | awk -v ver="$latest_chart" '
+            $1 == "appVersion:" { app=$2 }
+            $1 == "version:" && $2 == ver { print app; exit }
+          ')
+          latest_chart_url="https://socketdev-demo.github.io/socket-firewall-helm/socket-firewall-${latest_chart}.tgz"
 
           latest_image=""
           url="https://hub.docker.com/v2/repositories/socketdev/socket-registry-firewall/tags?page_size=100"
@@ -70,13 +92,62 @@ jobs:
           echo "image tag:  $current_image -> $latest_image"
 
           summary=""
+          notes=""
           if newer_than "$current_chart" "$latest_chart"; then
             set_tfvar helm_chart_version "$latest_chart"
-            summary+="- \`helm_chart_version\`: \`$current_chart\` → \`$latest_chart\`"$'\n'
+            summary+="- \`helm_chart_version\`: \`$current_chart\` → \`$latest_chart\` ([chart ${latest_chart}](${latest_chart_url}))"$'\n'
+            notes+="### Helm chart ${latest_chart}"$'\n\n'
+            notes+="- Package: [${latest_chart_url}](${latest_chart_url})"$'\n'
+            notes+="- Source: [${CHART_SOURCE_URL}](${CHART_SOURCE_URL})"$'\n'
+            if [ -n "$latest_chart_app" ]; then
+              notes+="- Chart \`appVersion\`: \`${latest_chart_app}\`"$'\n'
+            fi
+            notes+=$'\n'
+            notes+="_The Helm chart does not publish GitHub release notes._"$'\n\n'
           fi
           if newer_than "$current_image" "$latest_image"; then
             set_tfvar firewall_image_tag "$latest_image"
-            summary+="- \`firewall_image_tag\`: \`$current_image\` → \`$latest_image\`"$'\n'
+            image_release_url="https://github.com/${IMAGE_REPO}/releases/tag/v${latest_image}"
+            image_compare_url="https://github.com/${IMAGE_REPO}/compare/v${current_image}...v${latest_image}"
+            summary+="- \`firewall_image_tag\`: \`$current_image\` → \`$latest_image\` ([v${latest_image}](${image_release_url}))"$'\n'
+
+            notes+="### Image [v${latest_image}](${image_release_url})"$'\n\n'
+            notes+="[Compare v${current_image}…v${latest_image}](${image_compare_url})"$'\n\n'
+
+            releases_json=$(gh_api "https://api.github.com/repos/${IMAGE_REPO}/releases?per_page=100") || releases_json="[]"
+            count=0
+            max_notes=5
+            while IFS= read -r row; do
+              [ -z "$row" ] && continue
+              tag=$(echo "$row" | jq -r '.tag')
+              ver="${tag#v}"
+              echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || continue
+              if ! newer_than "$current_image" "$ver"; then
+                continue
+              fi
+              if newer_than "$latest_image" "$ver"; then
+                continue
+              fi
+              count=$((count + 1))
+              if [ "$count" -gt "$max_notes" ]; then
+                notes+="Further versions omitted; see [all releases](https://github.com/${IMAGE_REPO}/releases)."$'\n\n'
+                break
+              fi
+              release_url=$(echo "$row" | jq -r '.url')
+              name=$(echo "$row" | jq -r '.name')
+              body=$(echo "$row" | jq -r '.body')
+              notes+="**[${name}](${release_url})**"$'\n\n'
+              if [ -n "$body" ]; then
+                # Demote headings so GitHub release markdown nests under ### Image
+                notes+=$(printf '%s' "$body" | sed -E 's/^(#{1,5}) /\1## /')$'\n\n'
+              else
+                notes+="_No release notes published._"$'\n\n'
+              fi
+            done < <(echo "$releases_json" | jq -c '.[] | select(.draft|not) | select(.prerelease|not) | {tag: .tag_name, url: .html_url, name: (.name // .tag_name), body: (.body // "")}')
+
+            if [ "$count" -eq 0 ]; then
+              notes+="_Could not fetch release notes from GitHub. See [${image_release_url}](${image_release_url})._"$'\n\n'
+            fi
           fi
 
           if [ -z "$summary" ]; then
@@ -86,10 +157,26 @@ jobs:
           fi
 
           {
-            echo "updated=true"
-            echo "summary<<EOF"
+            echo "Automated weekly version check found newer releases."
+            echo
+            echo "## Updates"
+            echo
             printf '%s' "$summary"
-            echo "EOF"
+            echo
+            echo "## Release notes"
+            echo
+            printf '%s' "$notes"
+            echo "## Follow-up"
+            echo
+            echo "- Review the \`terraform plan\` check on this PR."
+            echo "- Confirm the new image is allowed by Binary Authorization before merging to \`main\`."
+            echo
+            echo "Triggered by [check-firewall-versions](.github/workflows/check-firewall-versions.yaml)."
+          } > "$BODY_FILE"
+
+          {
+            echo "updated=true"
+            echo "body_file=${BODY_FILE}"
           } >> "$GITHUB_OUTPUT"
       - name: Open PR if changes
         if: steps.check.outputs.updated == 'true'
@@ -98,23 +185,12 @@ jobs:
           branch: chore/bump-firewall-versions-${{ github.sha }}
           title: "chore: bump socket-firewall chart and image versions"
           commit_message: "chore: bump socket-firewall chart and image versions"
-          body: |
-            Automated weekly version check found newer releases.
-
-            ## Updates
-            ${{ steps.check.outputs.summary }}
-
-            ## Follow-up
-            - Review the `terraform plan` check on this PR.
-            - Confirm the new image is allowed by Binary Authorization before merging to `main`.
-
-            Triggered by [check-firewall-versions](.github/workflows/check-firewall-versions.yaml).
         run: |-
           git config user.name "getsantry[bot]"
           git config user.email "66042841+getsantry[bot]@users.noreply.github.com"
 
           git switch -c "${branch}" -m
-          git add .
+          git add terraform/terraform.tfvars
           git commit -m "${commit_message}"
           git push -u origin "${branch}"
 
@@ -122,4 +198,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --head "${branch}" \
             --title "${title}" \
-            --body "${body}"
+            --body-file "${{ steps.check.outputs.body_file }}"
